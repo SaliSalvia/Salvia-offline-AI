@@ -1,0 +1,6 @@
+{
+  "name": "DeepGGUF",
+  "description": "High-performance offline GGUF AI runner with dual text and image model slots, thinking process trace, zip and file inspection, and Xiaomi HyperOS hardware optimization in a sleek dark pink aesthetic.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
