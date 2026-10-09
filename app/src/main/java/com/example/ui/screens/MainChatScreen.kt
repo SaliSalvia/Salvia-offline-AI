@@ -325,25 +325,25 @@ fun MainChatScreen(
                 verticalAlignment = Alignment.CenterVertically
               ) {
                 Text(
-                  text = uiState.deviceProfile?.deviceModel ?: "Redmi Note 14 Pro",
+                  text = uiState.deviceProfile?.deviceModel ?: "Android device",
                   color = HyperOsOrange,
                   fontSize = 12.sp,
                   fontWeight = FontWeight.Bold
                 )
                 Text(
-                  text = "Android 16",
+                  text = uiState.deviceProfile?.androidVersion ?: "Android version unknown",
                   color = TextTertiary,
                   fontSize = 10.5.sp
                 )
               }
               Spacer(modifier = Modifier.height(4.dp))
               Text(
-                text = "رم آزاد: ${uiState.deviceProfile?.availRamGb ?: "5.2"} GB / ${uiState.deviceProfile?.totalRamGb ?: "12.0"} GB",
+                text = uiState.deviceProfile?.let { "RAM آزاد: ${it.availRamGb} GB / ${it.totalRamGb} GB" } ?: "RAM: در حال سنجش",
                 color = TextSecondary,
                 fontSize = 11.sp
               )
               Text(
-                text = "چیپست: Helio G100-Ultra / Mali-G57",
+                text = "SoC گزارش‌شده: ${uiState.deviceProfile?.socName ?: "نامشخص"}",
                 color = NeonPinkPrimary,
                 fontSize = 10.5.sp,
                 fontWeight = FontWeight.SemiBold
@@ -526,7 +526,7 @@ fun MainChatScreen(
               .imePadding()
               .padding(horizontal = 12.dp, vertical = 8.dp)
           ) {
-            // Resource Guard Alert Banner (Rule 9: Hard Stop at 80% with Cooldown)
+            // Resource Guard Alert Banner: actual memory pressure or critical Android thermal status
             if (uiState.resourceSnapshot?.isAiExecutionAllowed == false) {
               Box(
                 modifier = Modifier
@@ -538,7 +538,7 @@ fun MainChatScreen(
                   .padding(horizontal = 10.dp, vertical = 6.dp)
               ) {
                 Text(
-                  text = "🛑 AI Paused — Resource limit reached (${uiState.resourceSnapshot?.activeConstraintReason ?: "سقف ۸۰٪ منابع"}). در حال خنک‌سازی و بازگشت خودکار به زیر ۷۰٪.",
+                  text = "🛑 تولید متوقف شد: ${uiState.resourceSnapshot?.activeConstraintReason ?: "فشار منابع"}. پس از بازگشت حافظه و وضعیت حرارتی به محدودهٔ ایمن ادامه دهید.",
                   color = PerformanceBeastRed,
                   fontSize = 11.5.sp,
                   fontWeight = FontWeight.Bold

@@ -129,7 +129,7 @@ fun XiaomiTuningDialog(
                   .padding(horizontal = 6.dp, vertical = 2.dp)
               ) {
                 Text(
-                  text = telemetry?.hyperOsVersion ?: "HyperOS Engine",
+                  text = telemetry?.hyperOsVersion ?: "نسخهٔ سیستم نامشخص",
                   color = HyperOsOrange,
                   fontSize = 10.sp,
                   fontWeight = FontWeight.SemiBold
@@ -139,7 +139,7 @@ fun XiaomiTuningDialog(
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-              text = telemetry?.deviceModel ?: "Redmi Note 14 Pro",
+              text = telemetry?.deviceModel ?: "Android device",
               color = TextPrimary,
               fontSize = 14.5.sp,
               fontWeight = FontWeight.Bold
@@ -218,7 +218,15 @@ fun XiaomiTuningDialog(
               }
               Spacer(modifier = Modifier.height(4.dp))
               Text("${telemetry.cpuCores} هسته", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-              Text("${telemetry.performanceCores} قدرتمند + ${telemetry.efficiencyCores} کم‌مصرف", color = TextTertiary, fontSize = 10.sp)
+              Text(
+                if (telemetry.performanceCores > 0 && telemetry.efficiencyCores > 0) {
+                  "${telemetry.performanceCores} هستهٔ پرقدرت + ${telemetry.efficiencyCores} کم‌مصرف (تخمین از فرکانس sysfs)"
+                } else {
+                  "ترکیب هسته‌ها از رابط عمومی قابل‌تشخیص نیست"
+                },
+                color = TextTertiary,
+                fontSize = 10.sp
+              )
             }
 
             // Temperature box
@@ -235,8 +243,17 @@ fun XiaomiTuningDialog(
                 Text("دمای باتری", color = TextSecondary, fontSize = 11.sp)
               }
               Spacer(modifier = Modifier.height(4.dp))
-              Text("${telemetry.batteryTempCelsius} °C", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-              Text("شارژ: ${telemetry.batteryLevel}%", color = TextTertiary, fontSize = 10.sp)
+              Text(
+                telemetry.batteryTempCelsius?.let { "$it °C" } ?: "نامشخص",
+                color = TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+              )
+              Text(
+                "شارژ: ${telemetry.batteryLevel.takeIf { it >= 0 }?.let { "$it%" } ?: "نامشخص"}",
+                color = TextTertiary,
+                fontSize = 10.sp
+              )
             }
           }
         }

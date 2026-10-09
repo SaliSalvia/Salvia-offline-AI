@@ -2,9 +2,14 @@ package com.example.core.performance
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.os.Build
+import android.os.Debug
 import android.os.PowerManager
-import android.util.Log
+import android.os.Process
+import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,73 +22,89 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/**
+ * Resource states are advisory controls for the app's own work. Android and device firmware
+ * remain responsible for protecting the handset from unsafe temperatures and power conditions.
+ */
 enum class GuardResourceState(val titleFa: String, val levelCode: Int) {
-  NORMAL("عادی / حداکثر سرعت پایدار (0–69%)", 0),
-  CAUTION("هشدار / بهینه‌سازی پیشگیرانه بدون کاهش سرعت (70–79%)", 1),
-  HARD_STOP("توقف ایمن AI / رسیدن به سقف ۸۰٪ (80%+)", 2),
-  RESUMABLE("خنک‌سازی و آزادسازی حافظه / آماده ادامه (<=70%)", 3)
+  NORMAL("عادی", 0),
+  CAUTION("احتیاط", 1),
+  HARD_STOP("توقف ایمن", 2),
+  RESUMABLE("آماده ادامه", 3)
 }
 
 data class ResourceSnapshot(
   val ramUsagePctOfBudget: Int,
   val ramState: GuardResourceState,
+  /** App process CPU use as a percentage of total device CPU capacity; not system-wide CPU load. */
   val cpuSustainedPct: Int,
   val cpuState: GuardResourceState,
   val thermalState: GuardResourceState,
-  val thermalTempCelsius: Float,
+  /** Battery temperature reported by Android, not CPU/GPU temperature. */
+  val batteryTempCelsius: Float?,
   val thermalSystemStatus: String,
   val isAiExecutionAllowed: Boolean,
   val activeConstraintReason: String? = null,
   val safeAiRamBudgetMb: Int,
-  val aiCurrentlyUsedRamMb: Int
+  /** Process PSS includes UI and runtime memory; it is not a model-only measurement. */
+  val appProcessPssMb: Int
 )
 
 /**
- * Enterprise-grade Resource Guard for Mobile AI Workstations.
- *
- * Implements the 80% Hard Stop Safety Rule with 70% Hysteresis recovery.
- * Fully decoupled from the token generation loop (runs on lightweight 800ms monitor).
- * Never artificially caps speed between 0% and 79%.
- * Measures resources independently (RAM, CPU, Thermal).
+ * Conservative guard for this app's inference jobs.
+ * It uses Android's thermal severity, current process PSS and process CPU time. CPU utilization
+ * alone never stops inference: sustained CPU use is expected during local model generation.
  */
 class ResourceGuard(
   private val context: Context,
   private val scope: CoroutineScope
 ) {
   companion object {
-    private const val TAG = "ResourceGuard"
     const val THRESHOLD_CAUTION = 70
     const val THRESHOLD_HARD_STOP = 80
     const val THRESHOLD_RESUME = 70
-    private const val CPU_SPIKE_GRACE_PERIOD_MS = 2000L // Spikes < 2s are ignored
+    private const val MONITOR_INTERVAL_MS = 1_000L
+    private const val MIN_FREE_RAM_RESERVE_MB = 1_024
   }
 
-  private val actManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-  private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+  private val appContext = context.applicationContext
+  private val actManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+  private val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+  private val initialSafeAiRamBudgetMb = calculateSafeAiRamBudgetMb()
+  private val initialProcessPssMb = readProcessPssMb()
+  private val initialRamUsagePct = if (initialSafeAiRamBudgetMb > 0) {
+    ((initialProcessPssMb.toFloat() / initialSafeAiRamBudgetMb) * 100f).toInt().coerceIn(0, 100)
+  } else {
+    100
+  }
+  private val initialRamState = if (
+    initialSafeAiRamBudgetMb <= 0 || initialRamUsagePct >= THRESHOLD_HARD_STOP
+  ) GuardResourceState.HARD_STOP else GuardResourceState.NORMAL
 
   private val _snapshot = MutableStateFlow(
     ResourceSnapshot(
-      ramUsagePctOfBudget = 35,
-      ramState = GuardResourceState.NORMAL,
-      cpuSustainedPct = 25,
+      ramUsagePctOfBudget = initialRamUsagePct,
+      ramState = initialRamState,
+      cpuSustainedPct = 0,
       cpuState = GuardResourceState.NORMAL,
-      thermalState = GuardResourceState.NORMAL,
-      thermalTempCelsius = 32.0f,
-      thermalSystemStatus = "Normal",
-      isAiExecutionAllowed = true,
-      activeConstraintReason = null,
-      safeAiRamBudgetMb = calculateSafeAiRamBudgetMb(),
-      aiCurrentlyUsedRamMb = 1200
+      thermalState = GuardResourceState.CAUTION,
+      batteryTempCelsius = null,
+      thermalSystemStatus = "در انتظار دادهٔ سیستم",
+      isAiExecutionAllowed = initialRamState != GuardResourceState.HARD_STOP,
+      activeConstraintReason = if (initialRamState == GuardResourceState.HARD_STOP) "سقف امن حافظه هنوز تأیید نشده است" else null,
+      safeAiRamBudgetMb = initialSafeAiRamBudgetMb,
+      appProcessPssMb = initialProcessPssMb
     )
   )
   val snapshot: StateFlow<ResourceSnapshot> = _snapshot.asStateFlow()
 
   private var monitorJob: Job? = null
-  private var cpuHighSinceMs: Long = 0L
-  private var isHardStopped: Boolean = false
+  private var previousProcessCpuMs: Long? = null
+  private var previousElapsedMs: Long? = null
+  private var isHardStopped = false
+  private var wasInRamCaution = false
   private val stateMutex = Mutex()
 
-  // Listeners for lifecycle coordination
   var onPreventiveCleanupRequested: (() -> Unit)? = null
   var onEmergencyAiStopRequested: ((reason: String) -> Unit)? = null
   var onAiResumeAllowed: (() -> Unit)? = null
@@ -92,183 +113,172 @@ class ResourceGuard(
     startDecoupledMonitor()
   }
 
-  /**
-   * Decoupled monitoring loop.
-   * Runs independently every 800ms. Never called inside per-token loop!
-   */
   private fun startDecoupledMonitor() {
     monitorJob?.cancel()
     monitorJob = scope.launch(Dispatchers.IO) {
       while (isActive) {
-        delay(800L)
         evaluateSystemState()
+        delay(MONITOR_INTERVAL_MS)
       }
     }
   }
 
   private suspend fun evaluateSystemState() = stateMutex.withLock {
     val memInfo = ActivityManager.MemoryInfo()
-    actManager.getMemoryInfo(memInfo)
+    actManager?.getMemoryInfo(memInfo)
 
-    val safeBudgetMb = calculateSafeAiRamBudgetMb()
-    val totalRamMb = (memInfo.totalMem / (1024 * 1024)).toInt()
-    val availRamMb = (memInfo.availMem / (1024 * 1024)).toInt()
-    val systemUsedRamMb = totalRamMb - availRamMb
-
-    // AI Ram usage relative to its safe budget
-    val estimatedAiMb = (_snapshot.value.aiCurrentlyUsedRamMb).coerceAtLeast(400)
-    val ramBudgetUsedPct = ((estimatedAiMb.toFloat() / safeBudgetMb.toFloat()) * 100).toInt().coerceIn(0, 100)
+    val safeBudgetMb = calculateSafeAiRamBudgetMb(memInfo)
+    val processPssMb = readProcessPssMb()
+    val ramBudgetUsedPct = if (safeBudgetMb > 0) {
+      ((processPssMb.toFloat() / safeBudgetMb) * 100f).toInt().coerceIn(0, 100)
+    } else {
+      100
+    }
 
     val ramState = when {
-      ramBudgetUsedPct >= THRESHOLD_HARD_STOP || memInfo.lowMemory -> GuardResourceState.HARD_STOP
+      memInfo.lowMemory || safeBudgetMb <= 0 || ramBudgetUsedPct >= THRESHOLD_HARD_STOP -> GuardResourceState.HARD_STOP
       ramBudgetUsedPct >= THRESHOLD_CAUTION -> GuardResourceState.CAUTION
       else -> GuardResourceState.NORMAL
     }
 
-    // 2. CPU with Hysteresis (Short spikes under 2s do NOT stop AI)
-    val sampledCpuPct = sampleCpuUsagePct()
-    val now = System.currentTimeMillis()
-    if (sampledCpuPct >= THRESHOLD_HARD_STOP) {
-      if (cpuHighSinceMs == 0L) cpuHighSinceMs = now
-    } else {
-      cpuHighSinceMs = 0L
-    }
+    val cpuPct = sampleProcessCpuUsagePct()
+    val cpuState = if (cpuPct >= THRESHOLD_CAUTION) GuardResourceState.CAUTION else GuardResourceState.NORMAL
+    val thermal = evaluateThermalStatus()
 
-    val isCpuSustainedHigh = cpuHighSinceMs != 0L && (now - cpuHighSinceMs) >= CPU_SPIKE_GRACE_PERIOD_MS
-    val cpuState = when {
-      isCpuSustainedHigh -> GuardResourceState.HARD_STOP
-      sampledCpuPct >= THRESHOLD_CAUTION -> GuardResourceState.CAUTION
-      else -> GuardResourceState.NORMAL
-    }
-
-    // 3. Official Android Thermal Status
-    val (thermalState, thermalDesc, tempC) = evaluateThermalStatus()
-
-    // 4. Multi-resource independent threshold & Hysteresis arbitration
-    val shouldStop = (ramState == GuardResourceState.HARD_STOP) ||
-                     (cpuState == GuardResourceState.HARD_STOP && thermalState != GuardResourceState.NORMAL) ||
-                     (thermalState == GuardResourceState.HARD_STOP)
-
-    val canResume = (ramBudgetUsedPct <= THRESHOLD_RESUME) &&
-                    (!isCpuSustainedHigh) &&
-                    (thermalState != GuardResourceState.HARD_STOP)
+    // Do not stop a healthy inference just because its CPU use is high. Stop only for critical
+    // Android thermal severity or a real memory pressure / low-memory signal.
+    val shouldStop = ramState == GuardResourceState.HARD_STOP || thermal.first == GuardResourceState.HARD_STOP
+    val canResume = ramBudgetUsedPct <= THRESHOLD_RESUME &&
+      !memInfo.lowMemory && thermal.first != GuardResourceState.HARD_STOP
 
     var constraintMsg: String? = null
-
-    if (shouldStop) {
-      if (!isHardStopped) {
-        isHardStopped = true
-        constraintMsg = when {
-          ramState == GuardResourceState.HARD_STOP -> "سقف ۸۰٪ حافظه امن AI پر شد (RAM Safety Stop)"
-          thermalState == GuardResourceState.HARD_STOP -> "دمای دستگاه در وضعیت بحرانی حرارتی (Thermal Safety Stop)"
-          else -> "بار ممتد CPU بالاتر از ۸۰٪ به همراه فشار حرارتی"
-        }
-        onEmergencyAiStopRequested?.invoke(constraintMsg)
+    if (shouldStop && !isHardStopped) {
+      isHardStopped = true
+      constraintMsg = when {
+        ramState == GuardResourceState.HARD_STOP -> "فشار واقعی حافظهٔ فرایند یا هشدار کمبود حافظهٔ اندروید"
+        else -> "وضعیت حرارتی بحرانی گزارش‌شده توسط اندروید"
       }
+      onEmergencyAiStopRequested?.invoke(constraintMsg)
     } else if (isHardStopped && canResume) {
       isHardStopped = false
       onAiResumeAllowed?.invoke()
-    } else if (ramState == GuardResourceState.CAUTION) {
-      // 70–79% Caution range: Keep full speed, but trigger background preventive cleanup!
+    }
+
+    if (ramState == GuardResourceState.CAUTION && !wasInRamCaution) {
       onPreventiveCleanupRequested?.invoke()
     }
+    wasInRamCaution = ramState == GuardResourceState.CAUTION
 
     _snapshot.value = ResourceSnapshot(
       ramUsagePctOfBudget = ramBudgetUsedPct,
       ramState = ramState,
-      cpuSustainedPct = sampledCpuPct,
+      cpuSustainedPct = cpuPct,
       cpuState = cpuState,
-      thermalState = thermalState,
-      thermalTempCelsius = tempC,
-      thermalSystemStatus = thermalDesc,
+      thermalState = thermal.first,
+      batteryTempCelsius = thermal.third,
+      thermalSystemStatus = thermal.second,
       isAiExecutionAllowed = !isHardStopped,
-      activeConstraintReason = if (isHardStopped) constraintMsg ?: "AI Paused — Resource limit reached" else null,
+      activeConstraintReason = if (isHardStopped) constraintMsg ?: "منابع دستگاه هنوز به محدودهٔ ایمن بازنگشته‌اند" else null,
       safeAiRamBudgetMb = safeBudgetMb,
-      aiCurrentlyUsedRamMb = estimatedAiMb
+      appProcessPssMb = processPssMb
     )
   }
 
-  fun updateAiMemoryFootprint(activeModelMb: Int, kvCacheMb: Int) {
-    val totalAi = activeModelMb + kvCacheMb + 300 // + runtime workspace
-    _snapshot.value = _snapshot.value.copy(aiCurrentlyUsedRamMb = totalAi)
-  }
+  /** Preflight check for model load; estimates weights + KV cache + workspace + safety margin. */
+  fun canSafelyLoadModel(modelWeightsMb: Int, contextTokens: Int): Pair<Boolean, String> {
+    if (modelWeightsMb <= 0 || contextTokens <= 0) {
+      return false to "مشخصات اندازه یا context مدل معتبر نیست."
+    }
 
-  /**
-   * Pre-flight Check before loading a model.
-   * If (weights + KV + workspace + safetyMargin) > safe budget, REJECT load.
-   */
-  fun canSafelyLoadModel(
-    modelWeightsMb: Int,
-    contextTokens: Int
-  ): Pair<Boolean, String> {
     val memInfo = ActivityManager.MemoryInfo()
-    actManager.getMemoryInfo(memInfo)
-    val availRamMb = (memInfo.availMem / (1024 * 1024)).toInt()
+    actManager?.getMemoryInfo(memInfo)
+    val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
+    val safeBudgetMb = calculateSafeAiRamBudgetMb(memInfo)
+    val currentPssMb = readProcessPssMb()
 
-    val kvCacheEstMb = (contextTokens * 0.12).toInt() // ~120MB per 1K context
-    val runtimeWorkspaceMb = 250
-    val safetyMarginMb = 500
-    val totalRequiredMb = modelWeightsMb + kvCacheEstMb + runtimeWorkspaceMb + safetyMarginMb
+    // A conservative generic estimate. Exact KV-cache size must come from model architecture and
+    // the selected runtime; this value is a preflight guard, not a substitute for runtime metrics.
+    val kvCacheEstimateMb = (contextTokens * 0.12f).toInt()
+    val runtimeWorkspaceMb = 300
+    val safetyMarginMb = 700
+    val incrementalRequiredMb = modelWeightsMb + kvCacheEstimateMb + runtimeWorkspaceMb + safetyMarginMb
+    val remainingAppBudgetMb = (safeBudgetMb - currentPssMb).coerceAtLeast(0)
+    val remainingPhysicalMb = (availableMb - MIN_FREE_RAM_RESERVE_MB).coerceAtLeast(0)
+    val allowedIncrementMb = minOf(remainingAppBudgetMb, remainingPhysicalMb)
 
-    val safeBudgetMb = calculateSafeAiRamBudgetMb()
-
-    return if (totalRequiredMb > safeBudgetMb || totalRequiredMb > (availRamMb * 0.85)) {
-      Pair(
-        false,
-        "عدم امکان بارگذاری ایمن: مدل و کانتکست به $totalRequiredMb MB نیاز دارند، اما سقف مجاز رم برای هوش مصنوعی $safeBudgetMb MB است."
-      )
+    return if (incrementalRequiredMb > allowedIncrementMb || memInfo.lowMemory) {
+      false to "بارگذاری رد شد: برآورد ${incrementalRequiredMb}MB است، اما پس از رزرو ایمنی فقط ${allowedIncrementMb}MB قابل‌استفاده است."
     } else {
-      Pair(true, "تایید ایمنی حافظه: مصرف تخمینی $totalRequiredMb MB در محدوده مجاز قرار دارد.")
+      true to "پیش‌بررسی حافظه موفق بود؛ مقدار نهایی هنگام بارگذاری باید دوباره کنترل شود."
     }
   }
 
-  private fun calculateSafeAiRamBudgetMb(): Int {
-    val memInfo = ActivityManager.MemoryInfo()
-    actManager.getMemoryInfo(memInfo)
-    val totalMb = (memInfo.totalMem / (1024 * 1024)).toInt()
+  private fun calculateSafeAiRamBudgetMb(memInfo: ActivityManager.MemoryInfo = ActivityManager.MemoryInfo()): Int {
+    val manager = actManager ?: return 0
+    if (memInfo.totalMem <= 0L) manager.getMemoryInfo(memInfo)
 
-    // Dynamic Safe AI Budget:
-    // Reserve ~2.5GB for Android system, ~1GB for foreground UI & apps, ~1GB safety buffer
-    val systemAndUiReserveMb = if (totalMb > 10000) 4200 else 3000
-    return maxOf(2000, totalMb - systemAndUiReserveMb)
+    val totalMb = (memInfo.totalMem / (1024L * 1024L)).toInt()
+    val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
+    if (totalMb <= 0 || availableMb <= 0) return 0
+
+    // Reserve at least 2GB and 30% of RAM for Android, other apps and transient allocations.
+    val systemReserveMb = maxOf(2_048, (totalMb * 0.30f).toInt())
+    val totalBudgetMb = (totalMb - systemReserveMb).coerceAtLeast(0)
+    val currentAvailabilityBudgetMb = (availableMb - MIN_FREE_RAM_RESERVE_MB).coerceAtLeast(0)
+    return minOf(totalBudgetMb, currentAvailabilityBudgetMb)
   }
 
-  private fun sampleCpuUsagePct(): Int {
-    // Lightweight estimation based on runtime active threads & throttling state
-    val cores = Runtime.getRuntime().availableProcessors()
-    return (40 + (cores * 3)).coerceIn(20, 85)
+  private fun readProcessPssMb(): Int = try {
+    (Debug.getPss() / 1_024L).toInt().coerceAtLeast(0)
+  } catch (_: Exception) {
+    0
   }
 
-  private fun evaluateThermalStatus(): Triple<GuardResourceState, String, Float> {
-    var tempC = 34.0f
-    var statusName = "عادی (Normal)"
-    var state = GuardResourceState.NORMAL
+  /** Percent of the device's total CPU capacity consumed by this app process. */
+  private fun sampleProcessCpuUsagePct(): Int {
+    val nowElapsed = SystemClock.elapsedRealtime()
+    val nowCpu = Process.getElapsedCpuTime()
+    val oldElapsed = previousElapsedMs
+    val oldCpu = previousProcessCpuMs
+    previousElapsedMs = nowElapsed
+    previousProcessCpuMs = nowCpu
 
+    if (oldElapsed == null || oldCpu == null || nowElapsed <= oldElapsed) return 0
+    val elapsedDelta = nowElapsed - oldElapsed
+    val cpuDelta = (nowCpu - oldCpu).coerceAtLeast(0L)
+    val coreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    return ((cpuDelta.toDouble() / (elapsedDelta * coreCount)) * 100.0).toInt().coerceIn(0, 100)
+  }
+
+  /** Returns official Android thermal severity and the separately measured battery temperature. */
+  private fun evaluateThermalStatus(): Triple<GuardResourceState, String, Float?> {
+    val batteryTemp = readBatteryTemperatureCelsius()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && powerManager != null) {
-      val thermalStatus = powerManager.currentThermalStatus
-      when (thermalStatus) {
-        PowerManager.THERMAL_STATUS_NONE, PowerManager.THERMAL_STATUS_LIGHT -> {
-          statusName = "عادی و خنک (Cool)"
-          tempC = 33.5f
-          state = GuardResourceState.NORMAL
-        }
-        PowerManager.THERMAL_STATUS_MODERATE -> {
-          statusName = "افزایش ملایم دما (Moderate)"
-          tempC = 39.5f
-          state = GuardResourceState.CAUTION
-        }
-        PowerManager.THERMAL_STATUS_SEVERE -> {
-          statusName = "هشدار داغ شدن (Severe)"
-          tempC = 44.0f
-          state = GuardResourceState.CAUTION
-        }
-        PowerManager.THERMAL_STATUS_CRITICAL, PowerManager.THERMAL_STATUS_EMERGENCY, PowerManager.THERMAL_STATUS_SHUTDOWN -> {
-          statusName = "حرارت بحرانی سخت‌افزار (Critical)"
-          tempC = 48.0f
-          state = GuardResourceState.HARD_STOP
-        }
+      return when (powerManager.currentThermalStatus) {
+        PowerManager.THERMAL_STATUS_NONE -> Triple(GuardResourceState.NORMAL, "وضعیت حرارتی سیستم: عادی", batteryTemp)
+        PowerManager.THERMAL_STATUS_LIGHT -> Triple(GuardResourceState.NORMAL, "وضعیت حرارتی سیستم: کم", batteryTemp)
+        PowerManager.THERMAL_STATUS_MODERATE -> Triple(GuardResourceState.CAUTION, "وضعیت حرارتی سیستم: متوسط", batteryTemp)
+        PowerManager.THERMAL_STATUS_SEVERE -> Triple(GuardResourceState.HARD_STOP, "وضعیت حرارتی سیستم: شدید؛ تولید متوقف شد", batteryTemp)
+        PowerManager.THERMAL_STATUS_CRITICAL,
+        PowerManager.THERMAL_STATUS_EMERGENCY,
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> Triple(GuardResourceState.HARD_STOP, "هشدار حرارتی بحرانی اندروید", batteryTemp)
+        else -> Triple(GuardResourceState.CAUTION, "وضعیت حرارتی نامشخص", batteryTemp)
       }
     }
-    return Triple(state, statusName, tempC)
+
+    // On older Android versions there is no public thermal-severity API. Use battery temperature
+    // only as a conservative fallback, and label it as battery temperature rather than CPU temp.
+    return when {
+      batteryTemp == null -> Triple(GuardResourceState.CAUTION, "پایش حرارتی سیستم در این نسخه در دسترس نیست", null)
+      batteryTemp >= 46f -> Triple(GuardResourceState.HARD_STOP, "دمای باتری بالا؛ تولید متوقف شد", batteryTemp)
+      batteryTemp >= 42f -> Triple(GuardResourceState.CAUTION, "دمای باتری بالا رفته است", batteryTemp)
+      else -> Triple(GuardResourceState.NORMAL, "دمای باتری عادی؛ API حرارتی سیستم در دسترس نیست", batteryTemp)
+    }
+  }
+
+  private fun readBatteryTemperatureCelsius(): Float? {
+    val status: Intent = appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
+    val tenthsCelsius = status.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+    return if (tenthsCelsius >= 0) tenthsCelsius / 10f else null
   }
 }

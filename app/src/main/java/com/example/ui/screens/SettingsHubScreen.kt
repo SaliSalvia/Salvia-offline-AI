@@ -255,9 +255,9 @@ fun SettingsHubScreen(
           }
           Spacer(modifier = Modifier.width(10.dp))
           Column {
-            Text(text = "حالت تست هواپیما (Airplane Mode Test)", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
+            Text(text = "نشانگر تست آفلاین", color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.Bold)
             Text(
-              text = if (uiState.airplaneModeTestEnabled) "تست فعال: تمام دسترسی‌های شبکه قطع و هوش مصنوعی کاملاً آفلاین اجرا می‌شود." else "برای اثبات عدم نیاز به اینترنت فعال کنید.",
+              text = if (uiState.airplaneModeTestEnabled) "این فقط نشانگر رابط کاربری است؛ شبکه و حالت هواپیما را تغییر نمی‌دهد." else "برای آزمون واقعی، حالت هواپیما را از تنظیمات Android فعال و سپس مدل را اجرا کنید.",
               color = TextSecondary,
               fontSize = 11.sp
             )
@@ -285,9 +285,9 @@ fun SettingsHubScreen(
     Spacer(modifier = Modifier.height(6.dp))
 
     val userModes = listOf(
-      Triple("SIMPLE", "حالت ساده", "فقط مدل را انتخاب کنید، تمام تنظیمات و رزولوشن کامپیوتر خودکار مدیریت می‌شود."),
-      Triple("BALANCED", "حالت بهینه (پیش‌فرض)", "تعادل خودکار فرکانس و رم با پشتیبانی از Auto Performance."),
-      Triple("ADVANCED", "حالت پیشرفته", "دسترسی آزاد به تنظیم تعداد هسته‌ها، گام‌های انتشار و محدودیت‌های دمایی.")
+      Triple("SIMPLE", "حالت ساده", "نمایش کنترل‌های پایه و وضعیت واقعی دستگاه."),
+      Triple("BALANCED", "حالت متعادل (پیش‌فرض)", "پروفایل محافظه‌کارانهٔ مصرف و منابع برنامه."),
+      Triple("ADVANCED", "حالت پیشرفته", "نمایش جزئیات بیشتر؛ کنترل کلاک یا pinning سخت‌افزاری در اختیار برنامه نیست.")
     )
 
     userModes.forEach { (modeKey, title, desc) ->
@@ -367,9 +367,9 @@ fun SettingsHubScreen(
         .padding(12.dp)
     ) {
       Column {
-        Text(text = "Universal Offline AI Hub v2.0", color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
-        Text(text = "طراحی اختصاصی برای Redmi Note 14 Pro (Helio G100-Ultra / Mali-G57 MC2)", color = TextSecondary, fontSize = 11.sp)
-        Text(text = "موتورهای هماهنگ: llama.cpp ARM64, MNN Mobile, ONNX Runtime, Whisper STT, Kokoro TTS", color = TextTertiary, fontSize = 10.5.sp)
+        Text(text = "DeepGGUF • مدیریت مدل‌های محلی", color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+        Text(text = "پروفایل سخت‌افزار از اطلاعاتی ساخته می‌شود که Android واقعاً گزارش می‌کند.", color = TextSecondary, fontSize = 11.sp)
+        Text(text = "پشتیبانی از inference به runtime و فایل مدل معتبر نصب‌شده وابسته است.", color = TextTertiary, fontSize = 10.5.sp)
       }
     }
   }

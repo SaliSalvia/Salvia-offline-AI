@@ -4,10 +4,13 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.os.StatFs
+import kotlin.math.roundToInt
 
 data class DetailedDeviceProfile(
   val deviceModel: String,
@@ -19,7 +22,8 @@ data class DetailedDeviceProfile(
   val efficiencyCores: Int,
   val gpuModel: String,
   val vulkanSupported: Boolean,
-  val openClSupported: Boolean,
+  /** null means Android has no standard public capability check for this backend. */
+  val openClSupported: Boolean?,
   val totalRamGb: Float,
   val availRamGb: Float,
   val totalStorageGb: Float,
@@ -27,7 +31,8 @@ data class DetailedDeviceProfile(
   val androidVersion: String,
   val thermalStatus: String,
   val batteryLevel: Int,
-  val batteryTempCelsius: Float,
+  /** Battery temperature, not CPU/GPU temperature. Null when the system does not report it. */
+  val batteryTempCelsius: Float?,
   val recommendedLlmSize: String,
   val recommendedQuant: String,
   val recommendedContext: Int,
@@ -35,81 +40,123 @@ data class DetailedDeviceProfile(
 )
 
 object HardwareProfiler {
-
   fun profileDevice(context: Context): DetailedDeviceProfile {
-    val actMan = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val appContext = context.applicationContext
+    val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
     val memInfo = ActivityManager.MemoryInfo()
-    actMan?.getMemoryInfo(memInfo)
+    activityManager?.getMemoryInfo(memInfo)
 
     val totalRamGb = memInfo.totalMem / (1024f * 1024f * 1024f)
     val availRamGb = memInfo.availMem / (1024f * 1024f * 1024f)
 
-    // Storage
     val statFs = StatFs(Environment.getDataDirectory().path)
     val totalStorageGb = (statFs.blockCountLong * statFs.blockSizeLong) / (1024f * 1024f * 1024f)
     val freeStorageGb = (statFs.availableBlocksLong * statFs.blockSizeLong) / (1024f * 1024f * 1024f)
 
-    val cores = Runtime.getRuntime().availableProcessors()
-    val perfCores = maxOf(2, cores / 2)
-    val effCores = maxOf(2, cores - perfCores)
+    val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    val topology = CpuTopologyDetector.detect(cores)
+    val battery = readBatteryInfo(appContext)
+    val thermalDescription = readThermalDescription(appContext)
 
-    // Battery
-    val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { filter ->
-      context.registerReceiver(null, filter)
-    }
-    val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, 85) ?: 85
-    val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
-    val batteryPct = ((level / scale.toFloat()) * 100).toInt().coerceIn(0, 100)
-    val tempRaw = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 310) ?: 310
-    val tempCelsius = tempRaw / 10.0f
+    val modelName = Build.MODEL.takeIf(String::isNotBlank) ?: "Android device"
+    val manufacturer = Build.MANUFACTURER.takeIf(String::isNotBlank)
+      ?: Build.BRAND.takeIf(String::isNotBlank)
+      ?: "Unknown"
+    val socName = detectSocName()
+    val abis = Build.SUPPORTED_ABIS.joinToString(", ").ifBlank { "نامشخص" }
 
-    val thermal = when {
-      tempCelsius >= 45f -> "بحرانی / Critical (کاهش فرکانس)"
-      tempCelsius >= 39f -> "گرم / Warm (پایش دما)"
-      else -> "عادی و خنک / Normal"
-    }
-
-    val modelName = if (Build.MODEL.isNullOrEmpty()) "Redmi Note 14 Pro" else Build.MODEL
-    val brand = Build.BRAND.replaceFirstChar { it.uppercase() }
-
-    // Dynamic detection for SoC & GPU
-    val isRedmiNote14Pro = modelName.lowercase().contains("note 14") || modelName.lowercase().contains("2409")
-    val soc = if (isRedmiNote14Pro) "MediaTek Helio G100-Ultra (6nm)" else if (Build.HARDWARE.isNotEmpty()) Build.HARDWARE else "Octa-Core ARM64"
-    val gpu = if (isRedmiNote14Pro) "ARM Mali-G57 MC2" else "ARM Mali / Adreno Mobile GPU"
-
-    // Recommendations based on device RAM
-    val recModel = when {
-      totalRamGb >= 11f -> "7B - 8B Q4_K_M (یا 3B-4B برای نهایت سرعت)"
-      totalRamGb >= 7.5f -> "3B - 4B Q4_K_M"
-      else -> "1.5B - 2B Q4_0"
+    val vulkanSupported = try {
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+        appContext.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL)
+    } catch (_: Exception) {
+      false
     }
 
-    val recBackend = if (isRedmiNote14Pro) "ARM NEON + Mali OpenCL / MNN" else "ARM64 NEON Multi-threading"
-    val recContext = if (totalRamGb >= 11f) 4096 else 2048
+    // There is no reliable standard Android PackageManager feature for OpenCL. Do not claim it is
+    // supported merely because this device has a Mali/Adreno GPU.
+    val openClSupported: Boolean? = null
+
+    val totalRamMb = memInfo.totalMem / (1024L * 1024L)
+    val availableRamMb = memInfo.availMem / (1024L * 1024L)
+    val recommendedModel = when {
+      totalRamMb >= 10_000L && availableRamMb >= 4_000L ->
+        "۳B–۴B Q4 برای پیش‌فرض؛ ۷B فقط پس از پیش‌بررسی حافظه"
+      totalRamMb >= 7_000L -> "۱٫۵B–۳B Q4 (شروع محافظه‌کارانه)"
+      else -> "۱B–۲B Q4"
+    }
+    val recommendedContext = when {
+      availableRamMb < 1_500L -> 1024
+      totalRamMb >= 10_000L && availableRamMb >= 4_000L -> 4096
+      else -> 2048
+    }
 
     return DetailedDeviceProfile(
       deviceModel = modelName,
-      manufacturer = brand,
-      socName = soc,
-      cpuArchitecture = "ARM64-v8.2a (64-bit)",
+      manufacturer = manufacturer.replaceFirstChar { it.uppercase() },
+      socName = socName,
+      cpuArchitecture = abis,
       totalCores = cores,
-      performanceCores = perfCores,
-      efficiencyCores = effCores,
-      gpuModel = gpu,
-      vulkanSupported = true,
-      openClSupported = true,
-      totalRamGb = Math.round(totalRamGb * 10) / 10f,
-      availRamGb = Math.round(availRamGb * 10) / 10f,
-      totalStorageGb = Math.round(totalStorageGb * 10) / 10f,
-      freeStorageGb = Math.round(freeStorageGb * 10) / 10f,
+      performanceCores = topology.performanceCores,
+      efficiencyCores = topology.efficiencyCores,
+      gpuModel = "از API عمومی اندروید قابل‌تشخیص نیست",
+      vulkanSupported = vulkanSupported,
+      openClSupported = openClSupported,
+      totalRamGb = (totalRamGb * 10).roundToInt() / 10f,
+      availRamGb = (availRamGb * 10).roundToInt() / 10f,
+      totalStorageGb = (totalStorageGb * 10).roundToInt() / 10f,
+      freeStorageGb = (freeStorageGb * 10).roundToInt() / 10f,
       androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-      thermalStatus = thermal,
-      batteryLevel = batteryPct,
-      batteryTempCelsius = Math.round(tempCelsius * 10) / 10f,
-      recommendedLlmSize = recModel,
-      recommendedQuant = "Q4_K_M (کیفیت بالا + مصرف رم بهینه)",
-      recommendedContext = recContext,
-      recommendedBackend = recBackend
+      thermalStatus = thermalDescription,
+      batteryLevel = battery.first,
+      batteryTempCelsius = battery.second,
+      recommendedLlmSize = recommendedModel,
+      recommendedQuant = "Q4_K_M یا Q4_0؛ انتخاب نهایی با آزمون مدل روی دستگاه",
+      recommendedContext = recommendedContext,
+      recommendedBackend = "CPU/ARM64 به‌عنوان مسیر امن؛ GPU فقط پس از شناسایی و بنچمارک runtime"
     )
+  }
+
+  private fun detectSocName(): String {
+    val systemSoc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      listOf(Build.SOC_MANUFACTURER, Build.SOC_MODEL)
+        .filter(String::isNotBlank)
+        .joinToString(" ")
+    } else {
+      ""
+    }
+    return systemSoc.ifBlank { Build.HARDWARE.takeIf(String::isNotBlank) ?: "SoC نامشخص" }
+  }
+
+  private fun readBatteryInfo(context: Context): Pair<Int, Float?> {
+    val intent: Intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+      ?: return -1 to null
+    val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    val batteryLevel = if (level >= 0 && scale > 0) {
+      ((level / scale.toFloat()) * 100f).roundToInt().coerceIn(0, 100)
+    } else {
+      -1
+    }
+    val tenthsCelsius = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+    val batteryTemp = if (tenthsCelsius >= 0) tenthsCelsius / 10f else null
+    return batteryLevel to batteryTemp
+  }
+
+  private fun readThermalDescription(context: Context): String {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      return "شدت حرارتی سیستم از API عمومی در دسترس نیست"
+    }
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+      ?: return "وضعیت حرارتی نامشخص"
+    return when (powerManager.currentThermalStatus) {
+      PowerManager.THERMAL_STATUS_NONE -> "سیستم: عادی"
+      PowerManager.THERMAL_STATUS_LIGHT -> "سیستم: کم"
+      PowerManager.THERMAL_STATUS_MODERATE -> "سیستم: متوسط"
+      PowerManager.THERMAL_STATUS_SEVERE -> "سیستم: شدید"
+      PowerManager.THERMAL_STATUS_CRITICAL -> "سیستم: بحرانی"
+      PowerManager.THERMAL_STATUS_EMERGENCY -> "سیستم: اضطراری"
+      PowerManager.THERMAL_STATUS_SHUTDOWN -> "سیستم: خاموشی حرارتی"
+      else -> "وضعیت حرارتی نامشخص"
+    }
   }
 }

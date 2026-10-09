@@ -21,7 +21,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Memory
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Thermostat
@@ -35,11 +34,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,9 +64,7 @@ fun PerformanceHubScreen(
   modifier: Modifier = Modifier
 ) {
   val uiState by viewModel.uiState.collectAsState()
-  val coroutineScope = rememberCoroutineScope()
   val profile = uiState.deviceProfile
-  var isBenchmarking by remember { mutableStateOf(false) }
 
   Column(
     modifier = modifier
@@ -95,7 +87,7 @@ fun PerformanceHubScreen(
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "پایش بلادرنگ فرکانس، دما، حافظه RAM و چیپست دستگاه",
+          text = "پایش حافظهٔ فرایند، مصرف CPU اپ و وضعیت حرارتی گزارش‌شده توسط Android",
           color = TextSecondary,
           fontSize = 12.sp
         )
@@ -127,22 +119,41 @@ fun PerformanceHubScreen(
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically
         ) {
-          Text(text = profile?.deviceModel ?: "Redmi Note 14 Pro", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+          Text(text = profile?.deviceModel ?: "Android device", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
           Box(
             modifier = Modifier
               .clip(RoundedCornerShape(6.dp))
               .background(HyperOsOrange.copy(alpha = 0.15f))
               .padding(horizontal = 8.dp, vertical = 2.dp)
           ) {
-            Text(text = profile?.socName ?: "MediaTek Helio G100-Ultra", color = HyperOsOrange, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = profile?.socName ?: "SoC نامشخص", color = HyperOsOrange, fontSize = 10.5.sp, fontWeight = FontWeight.SemiBold)
           }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        Text(text = "پردازنده گرافیکی: ${profile?.gpuModel ?: "Mali-G57 MC2"} (پشتیبانی از OpenCL & Vulkan)", color = TextSecondary, fontSize = 11.5.sp)
-        Text(text = "معماری پردازنده: ${profile?.cpuArchitecture ?: "ARM64"} • هسته‌ها: ${profile?.totalCores ?: 8} (۴ قدرتمند + ۴ کم‌مصرف)", color = TextSecondary, fontSize = 11.5.sp)
-        Text(text = "نسخه سیستم‌عامل: ${profile?.androidVersion ?: "Android 16"} • رام رفرنس: Xiaomi HyperOS 2", color = TextSecondary, fontSize = 11.5.sp)
+        val vulkanStatus = when {
+          profile == null -> "Vulkan نامشخص"
+          profile.vulkanSupported -> "Vulkan اعلام‌شده توسط سیستم"
+          else -> "Vulkan در مشخصات سیستم اعلام نشده"
+        }
+        val openClStatus = when (profile?.openClSupported) {
+          true -> "OpenCL موجود"
+          false -> "OpenCL موجود نیست"
+          null -> "OpenCL نامشخص"
+        }
+        val accelerationStatus = "$vulkanStatus • $openClStatus"
+        Text(
+          text = "GPU: ${profile?.gpuModel ?: "نامشخص"} • $accelerationStatus",
+          color = TextSecondary,
+          fontSize = 11.5.sp
+        )
+        Text(
+          text = "ABI: ${profile?.cpuArchitecture ?: "نامشخص"} • تعداد هسته‌های قابل‌استفاده: ${profile?.totalCores ?: "—"}",
+          color = TextSecondary,
+          fontSize = 11.5.sp
+        )
+        Text(text = "سیستم‌عامل: ${profile?.androidVersion ?: "نامشخص"} • نسخهٔ HyperOS: ${uiState.telemetry?.hyperOsVersion ?: "نامشخص"}", color = TextSecondary, fontSize = 11.5.sp)
       }
     }
 
@@ -182,13 +193,16 @@ fun PerformanceHubScreen(
           }
 
           val stateBadge = when {
-            guardSnap?.isAiExecutionAllowed == false -> "STOP 80%+ 🛑"
-            (guardSnap?.ramUsagePctOfBudget ?: 0) >= 70 -> "CAUTION 70–79% ⚠️"
-            else -> "FULL SPEED 0–69% ⚡"
+            guardSnap?.isAiExecutionAllowed == false -> "توقف ایمن 🛑"
+            guardSnap?.ramState == com.example.core.performance.GuardResourceState.CAUTION ||
+              guardSnap?.thermalState == com.example.core.performance.GuardResourceState.CAUTION -> "احتیاط ⚠️"
+            guardSnap == null -> "در حال اندازه‌گیری…"
+            else -> "پایش فعال"
           }
           val badgeColor = when {
             guardSnap?.isAiExecutionAllowed == false -> PerformanceBeastRed
-            (guardSnap?.ramUsagePctOfBudget ?: 0) >= 70 -> HyperOsOrange
+            guardSnap?.ramState == com.example.core.performance.GuardResourceState.CAUTION ||
+              guardSnap?.thermalState == com.example.core.performance.GuardResourceState.CAUTION -> HyperOsOrange
             else -> TurboActiveGreen
           }
           Box(
@@ -205,9 +219,9 @@ fun PerformanceHubScreen(
 
         Text(
           text = if (guardSnap?.isAiExecutionAllowed == false) {
-            "🛑 ${guardSnap.activeConstraintReason} (سیستم منتظر خنک‌سازی و کاهش به زیر ۷۰٪ است)"
+            "🛑 ${guardSnap.activeConstraintReason} — پس از بازگشت حافظه و وضعیت حرارتی به محدودهٔ ایمن، اجرا از سر گرفته می‌شود."
           } else {
-            "✅ سرعت حداکثر پایدار: پردازش بدون کاهش مصنوعی سرعت در حال اجراست. فقط در سقف ۸۰٪ توقف ایمن اعمال می‌شود."
+            "پایش محافظه‌کارانه فعال است. بار CPU به‌تنهایی باعث توقف نمی‌شود؛ فشار حافظه یا هشدار حرارتی شدید، تولید را متوقف می‌کند."
           },
           color = if (guardSnap?.isAiExecutionAllowed == false) PerformanceBeastRed else TextSecondary,
           fontSize = 11.5.sp,
@@ -230,15 +244,15 @@ fun PerformanceHubScreen(
               .padding(8.dp)
           ) {
             Column {
-              Text(text = "سهمیه رم AI", color = TextSecondary, fontSize = 10.sp)
+              Text(text = "حافظهٔ فرایند اپ", color = TextSecondary, fontSize = 10.sp)
               Text(
-                text = "${guardSnap?.ramUsagePctOfBudget ?: 35}% / 80%",
+                text = "${guardSnap?.ramUsagePctOfBudget ?: 0}% / 80%",
                 color = if ((guardSnap?.ramUsagePctOfBudget ?: 0) >= 80) PerformanceBeastRed else TextPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
               )
               Text(
-                text = "سقف: ${guardSnap?.safeAiRamBudgetMb ?: 6000} MB",
+                text = "${guardSnap?.appProcessPssMb ?: 0} / ${guardSnap?.safeAiRamBudgetMb ?: 0} MB",
                 color = TextTertiary,
                 fontSize = 9.5.sp
               )
@@ -254,15 +268,15 @@ fun PerformanceHubScreen(
               .padding(8.dp)
           ) {
             Column {
-              Text(text = "بار ممتد CPU", color = TextSecondary, fontSize = 10.sp)
+              Text(text = "مصرف CPU اپ", color = TextSecondary, fontSize = 10.sp)
               Text(
-                text = "${guardSnap?.cpuSustainedPct ?: 30}% / 80%",
+                text = "${guardSnap?.cpuSustainedPct ?: 0}%",
                 color = TextPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
               )
               Text(
-                text = "فیلتر جهش موقت فعال",
+                text = "از ظرفیت کل پردازنده؛ توقف ایجاد نمی‌کند",
                 color = TextTertiary,
                 fontSize = 9.5.sp
               )
@@ -278,15 +292,15 @@ fun PerformanceHubScreen(
               .padding(8.dp)
           ) {
             Column {
-              Text(text = "وضعیت حرارتی", color = TextSecondary, fontSize = 10.sp)
+              Text(text = "دمای باتری", color = TextSecondary, fontSize = 10.sp)
               Text(
-                text = "${guardSnap?.thermalTempCelsius ?: 33.5}°C",
-                color = TurboActiveGreen,
+                text = guardSnap?.batteryTempCelsius?.let { "${it}°C" } ?: "—",
+                color = if (guardSnap?.thermalState == com.example.core.performance.GuardResourceState.HARD_STOP) PerformanceBeastRed else TextPrimary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
               )
               Text(
-                text = guardSnap?.thermalSystemStatus?.take(10) ?: "عادی",
+                text = guardSnap?.thermalSystemStatus?.take(16) ?: "وضعیت نامشخص",
                 color = TextTertiary,
                 fontSize = 9.5.sp
               )
@@ -308,16 +322,29 @@ fun PerformanceHubScreen(
       shape = RoundedCornerShape(12.dp)
     ) {
       Column(modifier = Modifier.padding(14.dp)) {
+        val ramProfile = profile?.takeIf { it.totalRamGb > 0f }
+        val hasRamProfile = ramProfile != null
+        val usedPct = ramProfile?.let {
+          (((it.totalRamGb - it.availRamGb) / it.totalRamGb) * 100).toInt().coerceIn(0, 100)
+        } ?: 0
+        val usedFraction = ramProfile?.let {
+          ((it.totalRamGb - it.availRamGb) / it.totalRamGb).coerceIn(0f, 1f)
+        } ?: 0f
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween
         ) {
-          Text(text = "حافظه آزاد: ${profile?.availRamGb ?: 5.2} GB از مجموع ${profile?.totalRamGb ?: 12.0} GB", color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
-          val usedPct = if (profile != null) (((profile.totalRamGb - profile.availRamGb) / profile.totalRamGb) * 100).toInt() else 50
-          Text(text = "$usedPct% اشغال شده", color = if (usedPct > 80) PerformanceBeastRed else TurboActiveGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+          Text(
+            text = ramProfile?.let { "RAM آزاد: ${it.availRamGb} GB از ${it.totalRamGb} GB" } ?: "اطلاعات RAM در دسترس نیست",
+            color = TextPrimary,
+            fontSize = 12.5.sp,
+            fontWeight = FontWeight.Medium
+          )
+          if (hasRamProfile) {
+            Text(text = "$usedPct% اشغال شده", color = if (usedPct > 80) PerformanceBeastRed else TurboActiveGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+          }
         }
         Spacer(modifier = Modifier.height(8.dp))
-        val usedFraction = if (profile != null) (profile.totalRamGb - profile.availRamGb) / profile.totalRamGb else 0.5f
         LinearProgressIndicator(
           progress = { usedFraction },
           modifier = Modifier
@@ -334,8 +361,8 @@ fun PerformanceHubScreen(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.SpaceBetween
         ) {
-          Text(text = "تخمین اشغال مدل فعال: ~4.3 GB", color = TextTertiary, fontSize = 11.sp)
-          Text(text = "تخمین کش کانتکست (KV Cache): ~380 MB", color = TextTertiary, fontSize = 11.sp)
+          Text(text = "حجم فایل مدل: ${uiState.textSlotModel.sizeFormatted}", color = TextTertiary, fontSize = 11.sp)
+          Text(text = "KV cache واقعی: پس از اتصال runtime", color = TextTertiary, fontSize = 11.sp)
         }
       }
     }
@@ -356,11 +383,16 @@ fun PerformanceHubScreen(
           Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Thermostat, contentDescription = null, tint = TurboActiveGreen, modifier = Modifier.size(18.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text(text = "دمای پردازنده", color = TextSecondary, fontSize = 12.sp)
+            Text(text = "دمای باتری", color = TextSecondary, fontSize = 12.sp)
           }
           Spacer(modifier = Modifier.height(6.dp))
-          Text(text = "${profile?.batteryTempCelsius ?: 32.5} °C", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-          Text(text = profile?.thermalStatus ?: "عادی / خنک", color = TurboActiveGreen, fontSize = 10.5.sp)
+          Text(
+            text = profile?.batteryTempCelsius?.let { "${it} °C" } ?: "نامشخص",
+            color = TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+          )
+          Text(text = profile?.thermalStatus ?: "وضعیت حرارتی نامشخص", color = TextSecondary, fontSize = 10.5.sp)
         }
       }
 
@@ -376,7 +408,12 @@ fun PerformanceHubScreen(
             Text(text = "شارژ باتری", color = TextSecondary, fontSize = 12.sp)
           }
           Spacer(modifier = Modifier.height(6.dp))
-          Text(text = "${profile?.batteryLevel ?: 80}%", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+          Text(
+            text = profile?.batteryLevel?.takeIf { it >= 0 }?.let { "$it%" } ?: "نامشخص",
+            color = TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+          )
           Text(text = "بهینه‌ساز توان فعال", color = NeonPinkLight, fontSize = 10.5.sp)
         }
       }
@@ -448,15 +485,10 @@ fun PerformanceHubScreen(
 
     Spacer(modifier = Modifier.height(16.dp))
 
-    // Benchmark Run Button
+    // A performance number is not shown until a real local model runtime can be benchmarked.
     Button(
-      onClick = {
-        isBenchmarking = true
-        coroutineScope.launch {
-          kotlinx.coroutines.delay(1200)
-          isBenchmarking = false
-        }
-      },
+      onClick = {},
+      enabled = false,
       colors = ButtonDefaults.buttonColors(containerColor = NeonPinkPrimary),
       shape = RoundedCornerShape(12.dp),
       modifier = Modifier
@@ -467,7 +499,7 @@ fun PerformanceHubScreen(
       Icon(Icons.Default.Speed, contentDescription = null, tint = BackgroundPitchBlack)
       Spacer(modifier = Modifier.width(8.dp))
       Text(
-        text = if (isBenchmarking) "در حال اجرای بنچمارک بلادرنگ..." else "اجرای تست سرعت سخت‌افزار (Benchmark TTFT & Tok/s)",
+        text = "بنچمارک TTFT و توکن/ثانیه پس از اتصال runtime واقعی فعال می‌شود",
         color = BackgroundPitchBlack,
         fontSize = 13.sp,
         fontWeight = FontWeight.Bold
