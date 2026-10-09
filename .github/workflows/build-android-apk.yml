@@ -29,7 +29,8 @@ jobs:
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '17'
+          # Robolectric 4.16 running tests against Android SDK 36 requires Java 21.
+          java-version: '21'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -49,7 +50,20 @@ jobs:
           code=$?
           cat gradle-test.log
           if [ $code -ne 0 ]; then
-            { grep -E '^e: ' gradle-test.log; awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-test.log; } > gradle-tail.txt
+            {
+              grep -E '^e: ' gradle-test.log
+              awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-test.log
+              python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for f in glob.glob('app/build/test-results/testDebugUnitTest/*.xml'):
+              root = ET.parse(f).getroot()
+              for tc in root.iter('testcase'):
+                  for child in tc:
+                      if child.tag in ('failure', 'error'):
+                          msg = (child.get('message') or child.text or '')[:400].replace('\n', ' ')
+                          print(f"FAILED {tc.get('classname')}.{tc.get('name')}: {msg}")
+          PY
+            } > gradle-tail.txt
             if [ ! -s gradle-tail.txt ]; then tail -c 2500 gradle-test.log > gradle-tail.txt; fi
             head -c 3000 gradle-tail.txt | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-annotation.txt
             echo "::error title=Unit test step failed::$(cat gradle-annotation.txt)"
