@@ -20,11 +20,28 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  signingConfigs {
+    // Release identity comes from the CI-provided keystore. The keystore itself is never
+    // committed; see .github/workflows/build-android-apk.yml.
+    val envKeystorePath = System.getenv("KEYSTORE_PATH")
+    val envStorePassword = System.getenv("STORE_PASSWORD")
+    val envKeyPassword = System.getenv("KEY_PASSWORD")
+    if (envKeystorePath != null && envStorePassword != null && envKeyPassword != null) {
+      create("release") {
+        storeFile = file(envKeystorePath)
+        storePassword = envStorePassword
+        keyAlias = System.getenv("KEY_ALIAS") ?: "salvia"
+        keyPassword = envKeyPassword
+      }
+    }
+  }
+
   buildTypes {
     release {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      signingConfig = signingConfigs.findByName("release")
     }
     // Use Android Gradle Plugin's standard debug signing key. A custom ignored keystore made CI
     // builds fail because the file was not present in a fresh checkout.

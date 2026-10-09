@@ -43,6 +43,52 @@ jobs:
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v6
 
+      # Release signing keeps one stable app identity so future APKs upgrade in place on the
+      # phone. Preferred source is the KEYSTORE_B64/KEYSTORE_PASSWORD repository secrets.
+      # Without secrets, a keystore is generated once and kept in GitHub Actions cache; the
+      # private key is never committed to git. Cached keys may be evicted after long idle
+      # periods, which would require an uninstall/reinstall on the next upgrade.
+      - name: Prepare release signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p ci-runtime
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > ci-runtime/salvia-release.jks
+            echo "HAS_KEYSTORE_SECRET=1" >> "$GITHUB_ENV"
+            echo "Using release keystore from repository secrets."
+          else
+            echo "HAS_KEYSTORE_SECRET=0" >> "$GITHUB_ENV"
+            echo "Repository secrets not configured; using cached generated keystore."
+          fi
+
+      - name: Restore cached release keystore
+        id: restore-keystore
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-runtime/salvia-release.jks
+          key: salvia-release-keystore-v1
+
+      - name: Generate release keystore if missing
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' }}
+        run: |
+          if [ ! -f ci-runtime/salvia-release.jks ]; then
+            keytool -genkeypair -keystore ci-runtime/salvia-release.jks -storetype PKCS12 \
+              -alias salvia -keyalg RSA -keysize 2048 -validity 12500 \
+              -storepass salvia-offline-ai -keypass salvia-offline-ai \
+              -dname "CN=Salvia Offline AI, OU=Offline, O=Salvia, C=AT"
+          fi
+
+      - name: Save cached release keystore
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' && steps.restore-keystore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ci-runtime/salvia-release.jks
+          key: salvia-release-keystore-v1
+
       - name: Run unit tests
         run: |
           set +e
@@ -70,23 +116,28 @@ jobs:
             exit $code
           fi
 
-      - name: Build installable APK
+      - name: Build release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/ci-runtime/salvia-release.jks
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'salvia-offline-ai' }}
+          KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'salvia-offline-ai' }}
+          KEY_ALIAS: salvia
         run: |
           set +e
-          ./gradlew --no-daemon --stacktrace assembleDebug > gradle-assemble.log 2>&1
+          ./gradlew --no-daemon --stacktrace assembleRelease > gradle-release.log 2>&1
           code=$?
-          cat gradle-assemble.log
+          cat gradle-release.log
           if [ $code -ne 0 ]; then
-            { grep -E '^e: ' gradle-assemble.log; awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-assemble.log; } > gradle-tail.txt
-            if [ ! -s gradle-tail.txt ]; then tail -c 2500 gradle-assemble.log > gradle-tail.txt; fi
+            { grep -E '^e: ' gradle-release.log; awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-release.log; } > gradle-tail.txt
+            if [ ! -s gradle-tail.txt ]; then tail -c 2500 gradle-release.log > gradle-tail.txt; fi
             head -c 3000 gradle-tail.txt | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-annotation.txt
-            echo "::error title=APK build step failed::$(cat gradle-annotation.txt)"
+            echo "::error title=Release APK build step failed::$(cat gradle-annotation.txt)"
             exit $code
           fi
 
       - name: Verify APK and create checksum
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
+          APK="app/build/outputs/apk/release/app-release.apk"
           test -s "$APK"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
           sha256sum "$APK" > "$APK.sha256"
@@ -94,9 +145,9 @@ jobs:
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
-          name: Salvia-offline-AI-debug-apk
+          name: Salvia-offline-AI-release-apk
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/debug/app-debug.apk.sha256
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release.apk.sha256
           if-no-files-found: error
           retention-days: 30
