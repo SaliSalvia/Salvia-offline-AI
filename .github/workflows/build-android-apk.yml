@@ -42,8 +42,29 @@ jobs:
       - name: Set up Gradle caching
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Run unit tests and build APK
-        run: ./gradlew --no-daemon --stacktrace testDebugUnitTest assembleDebug
+      - name: Run unit tests
+        run: |
+          set +e
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest > gradle-test.log 2>&1
+          code=$?
+          cat gradle-test.log
+          if [ $code -ne 0 ]; then
+            tail -c 3000 gradle-test.log | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-tail.txt
+            echo "::error title=Unit test step failed::$(cat gradle-tail.txt)"
+            exit $code
+          fi
+
+      - name: Build installable APK
+        run: |
+          set +e
+          ./gradlew --no-daemon --stacktrace assembleDebug > gradle-assemble.log 2>&1
+          code=$?
+          cat gradle-assemble.log
+          if [ $code -ne 0 ]; then
+            tail -c 3000 gradle-assemble.log | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-tail.txt
+            echo "::error title=APK build step failed::$(cat gradle-tail.txt)"
+            exit $code
+          fi
 
       - name: Verify APK and create checksum
         run: |
