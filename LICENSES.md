@@ -13,6 +13,17 @@ Salvia Offline AI ships with the following third-party components.
 - **License:** MIT — Copyright (c) 2023-2024 The ggml authors. Full text:
   <https://github.com/ggml-org/llama.cpp/blob/master/LICENSE>
 
+## whisper.cpp (speech-to-text engine)
+
+- **Component:** [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) (pinned release `v1.9.5`)
+- **How it is used:** compiled into `libsalvia_llama.so` alongside llama.cpp and called through
+  the JNI bridge (`app/src/main/cpp/salvia_whisper_jni.cpp`) to transcribe speech fully offline.
+  whisper.cpp reuses the same in-tree `ggml` built for llama.cpp (one ggml copy in the binary).
+- **Source availability:** fetched at build time by the CI workflow into
+  `app/src/main/cpp/whisper.cpp/` (git-ignored) from the pinned tag.
+- **License:** MIT — Copyright (c) 2023-2024 The ggml authors. Full text:
+  <https://github.com/ggml-org/whisper.cpp/blob/master/LICENSE>
+
 ## Other bundled dependencies
 
 AndroidX, Jetpack Compose, Kotlin, Room and Coil are consumed as binary artifacts from Maven

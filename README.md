@@ -14,9 +14,10 @@
 | کنترل پارامترهای تولید (دما، top-p/k، طول پاسخ، تکرار، context، نخ‌ها) | ✅ با ذخیرهٔ دائمی و محدودهٔ امن سخت‌افزاری |
 | ایمنی سخت‌افزار (پایش PSS، حرارت رسمی Android، سقف رم) | ✅ توقف خودکار هنگام فشار واقعی حافظه/حرارت |
 | وارد کردن فایل‌های ZIP/سند/تصویر و الحاق به پرامپت | ✅ محتوای استخراج‌شده واقعاً به مدل داده می‌شود |
-| بازیابی محلی RAG (بردار هش) | ⚠️ نمایه‌سازی و بازیابی محلی؛ هنوز موتور embedder واقعی ندارد |
+| بازیابی محلی RAG (بردار واژگانی) + تزریق نتایج به پرامپت | ✅ قطعات مرتبط واقعاً به مدل داده می‌شوند (امتیازدهی lexical) |
+| مدل‌های استدلالی (`<think>`) | ✅ جریان تفکر زنده از پاسخ تفکیک و ذخیره می‌شود |
 | تولید تصویر پیکسلی | ❌ موتور diffusion بسته‌بندی نشده — UI صادقانه اعلام می‌کند |
-| تبدیل صوت به متن | ❌ موتور ASR بسته‌بندی نشده — صوت ساختگی تولید نمی‌شود |
+| تبدیل صوت به متن | ✅ **whisper.cpp واقعی** — بارگذاری مدل Whisper (GGUF)، رمزگشایی صوت با MediaCodec، رونویسی آفلاین |
 | خواندن متن با صدا (TTS) | ✅ از TTS سیستمی Android (آفلاین) |
 
 > ادعاها صادقانه‌اند: موتورهای جعلی در این پروژه جایی ندارند؛ هر چیزی که اجرا نشود، به‌وضوح «اجرا نمی‌شود» برچسب می‌خورد.
@@ -47,19 +48,27 @@
 
 **راهنمای اندازه:** مدل‌های ۱–۳ میلیارد پارامتر با کوانتیزاسیون Q4 برای این گوشی ایده‌آل‌اند. مدل‌های ۷B فقط با رم ۱۲ گیگابایتی و انتظار سرعت پایین.
 
+## 🎙️ تبدیل صوت به متن (Whisper)
+
+1. یک مدل **Whisper GGUF** (مثلاً `whisper-base` یا `whisper-small`) را دانلود کنید.
+2. در بخش «صوت و گفتار»، دکمهٔ «وارد کردن مدل Whisper (GGUF)» را بزنید.
+3. فایل صوتی (WAV/MP3/M4A) را انتخاب کنید — رمزگشایی و رونویسی کاملاً روی گوشی انجام می‌شود.
+
 ## 🛠️ ساخت از سورس
 
 ```bash
-# 1) دریافت llama.cpp (پین‌شده به v0.6.0 — همان نسخهٔ CI)
-mkdir -p app/src/main/cpp/llama.cpp
+# 1) دریافت llama.cpp + whisper.cpp (پین‌شده — همان نسخه‌های CI)
+mkdir -p app/src/main/cpp/llama.cpp app/src/main/cpp/whisper.cpp
 curl -sSL https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/v0.6.0 \
   | tar xz --strip-components=1 -C app/src/main/cpp/llama.cpp
+curl -sSL https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/refs/tags/v1.9.5 \
+  | tar xz --strip-components=1 -C app/src/main/cpp/whisper.cpp
 
 # 2) ساخت APK امضاشده (نیازمند JDK 21، Android SDK 36، NDK 27.2، CMake 3.22.1)
 ./gradlew assembleRelease
 ```
 
-پوشهٔ `app/src/main/cpp/llama.cpp/` در `.gitignore` است؛ سورس در زمان ساخت واکشی می‌شود.
+پوشه‌های `app/src/main/cpp/llama.cpp/` و `app/src/main/cpp/whisper.cpp/` در `.gitignore` هستند؛ سورس در زمان ساخت واکشی می‌شود.
 
 ## 🧪 تست‌ها
 
@@ -76,3 +85,4 @@ curl -sSL https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/v0.6.0
 
 - این مخزن: استفادهٔ شخصی/آموزشی طبق شرایط مخزن.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) (ggml) — **MIT**؛ جزئیات در [LICENSES.md](LICENSES.md).
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — **MIT**؛ جزئیات در [LICENSES.md](LICENSES.md).

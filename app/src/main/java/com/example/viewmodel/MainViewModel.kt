@@ -7,6 +7,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
 import com.example.core.localization.AppLanguage
+import com.example.core.asr.NativeAsrBackend
+import com.example.core.asr.RealAsrEngine
 import com.example.core.llm.GenerationParams
 import com.example.core.llm.GenerationParamsStore
 import com.example.core.llm.NativeLlamaBackend
@@ -34,6 +36,7 @@ import com.example.data.ChatMessageEntity
 import com.example.data.ChatSessionEntity
 import com.example.files.AttachedFile
 import com.example.files.FileInspector
+import com.example.core.voice.PcmDecoder
 import com.example.generator.GenerationProgress
 import com.example.generator.OfflineImageEngine
 import com.example.gguf.GgufInferenceEngine
@@ -94,6 +97,9 @@ data class ChatUiState(
   val isSpeakingAudio: Boolean = false,
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
+  val isTranscribing: Boolean = false,
+  val asrModelLabel: String? = null,
+  val lastTranscription: String? = null,
   val routerNotice: String? = null,
   val advisorInsights: List<String> = emptyList(),
   val activeContextTokens: Int = 4096,
@@ -116,6 +122,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   // Real offline inference (llama.cpp). PSS is sampled around model loads so the
   // app can report honest memory numbers instead of guesses.
   val llmEngine = RealLlmEngine(NativeLlamaBackend(), pssReader = { android.os.Debug.getPss() })
+  // Real offline speech-to-text (whisper.cpp).
+  val asrEngine = RealAsrEngine(NativeAsrBackend(), pssReader = { android.os.Debug.getPss() })
   private val genParamsStore = GenerationParamsStore(prefs)
 
   private val _uiState = MutableStateFlow(ChatUiState())
@@ -126,6 +134,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     _uiState.value = _uiState.value.copy(
       liveAnswer = accumulated
     )
+  }
+
+  // Same batching for the reasoning stream of thinking models.
+  private val thinkingBatcher = TokenBatcher(viewModelScope, batchIntervalMs = 60L) { _, accumulated ->
+    _uiState.value = _uiState.value.copy(liveThinking = accumulated)
   }
 
   private var activeGenerationJob: Job? = null
@@ -623,9 +636,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 4. Real offline inference (llama.cpp) — history-aware, streamed, cancellable.
     // The optimistic user message is already in state; history excludes it.
     val priorMessages = _uiState.value.messages.dropLast(1)
-    val userContent = buildUserContentWithAttachments(trimmed, stagedFiles)
 
     viewModelScope.launch(Dispatchers.IO) {
+      val ragHits = ragEngine.retrieve(trimmed, topK = 3).filter { it.similarityScore >= 0.15f }
+      val userContent = buildUserContentWithAttachments(trimmed, stagedFiles, ragHits)
       chatDao.insertMessage(userMsg)
 
       activeGenerationJob?.cancel()
@@ -643,13 +657,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
         val history = buildChatHistory(priorMessages, userContent)
 
-        val outcome = llmEngine.generate(history, _uiState.value.generationParams) { delta ->
-          tokenBatcher.appendToken(delta)
-        }
+        val outcome = llmEngine.generate(
+          history = history,
+          params = _uiState.value.generationParams,
+          onThinking = { delta -> thinkingBatcher.appendToken(delta) },
+          onAnswer = { delta -> tokenBatcher.appendToken(delta) }
+        )
 
         when (outcome) {
           is RealLlmEngine.GenerateOutcome.Failure -> {
             tokenBatcher.reset()
+            thinkingBatcher.reset()
             withContext(Dispatchers.Main) {
               _uiState.value = _uiState.value.copy(
                 isStreaming = false,
@@ -658,25 +676,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
           }
           else -> {
-            val finalFullAnswer = outcome.let {
-              when (it) {
-                is RealLlmEngine.GenerateOutcome.Completed -> it.text
-                is RealLlmEngine.GenerateOutcome.Cancelled -> it.text
-                else -> ""
-              }
-            }
-            val finalTps = (outcome as? RealLlmEngine.GenerateOutcome.Completed)?.tokensPerSecond ?: 0f
-            val wasCancelled = outcome is RealLlmEngine.GenerateOutcome.Cancelled
+            val completed = outcome as? RealLlmEngine.GenerateOutcome.Completed
+            val cancelled = outcome as? RealLlmEngine.GenerateOutcome.Cancelled
+            val finalFullAnswer = (completed?.text ?: cancelled?.text ?: "")
+              .ifEmpty { tokenBatcher.getAccumulated() }
+            val finalThinking = (completed?.thinking ?: cancelled?.thinking ?: "")
+              .ifEmpty { thinkingBatcher.getAccumulated() }
+            val finalTps = completed?.tokensPerSecond ?: 0f
+            val wasCancelled = cancelled != null
 
             tokenBatcher.flushNow()
-            val answerText = finalFullAnswer.ifEmpty { tokenBatcher.getAccumulated() }
+            thinkingBatcher.flushNow()
 
             val assistantMsg = ChatMessageEntity(
               sessionId = session.id,
               role = "assistant",
-              content = if (wasCancelled) "$answerText\n\n(تولید توسط کاربر متوقف شد)" else answerText,
-              thinkingContent = null,
-              thinkingDurationMs = 0L,
+              content = if (wasCancelled) "$finalFullAnswer\n\n(تولید توسط کاربر متوقف شد)" else finalFullAnswer,
+              thinkingContent = finalThinking.ifBlank { null },
+              thinkingDurationMs = completed?.promptMs ?: 0L,
               tokensPerSecond = finalTps
             )
             chatDao.insertMessage(assistantMsg)
@@ -703,10 +720,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /**
    * Builds the model-facing user message: the prompt plus bounded excerpts of
    * any attached files, so the real offline model can actually reason over them.
+   * When the local RAG index has relevant chunks for the prompt, they are
+   * injected as references (bounded) — retrieval that actually reaches the model.
    */
-  private fun buildUserContentWithAttachments(prompt: String, stagedFiles: List<AttachedFile>): String {
-    if (stagedFiles.isEmpty()) return prompt
+  private fun buildUserContentWithAttachments(
+    prompt: String,
+    stagedFiles: List<AttachedFile>,
+    ragHits: List<RetrievalResult> = emptyList()
+  ): String {
+    if (stagedFiles.isEmpty() && ragHits.isEmpty()) return prompt
     val sb = StringBuilder(prompt)
+
+    if (ragHits.isNotEmpty()) {
+      sb.append("\n\n[مراجع بازیابی‌شده از اسناد محلی کاربر]\n")
+      var budget = 2400
+      for (hit in ragHits) {
+        if (budget <= 0) break
+        val excerpt = hit.chunk.text.take(minOf(800, budget))
+        sb.append("(از «").append(hit.chunk.documentName).append("») ").append(excerpt).append("\n")
+        budget -= excerpt.length
+      }
+    }
+
     for (f in stagedFiles) {
       sb.append("\n\n[پیوست: ").append(f.fileName).append(" — ").append(f.sizeFormatted).append("]\n")
       val body = f.fullTextSample?.take(6000)?.takeIf { it.isNotBlank() }
@@ -816,6 +851,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     activeGenerationJob = null
     cancelActiveImageGeneration()
     tokenBatcher.reset()
+    thinkingBatcher.reset()
     _uiState.update { current ->
       current.copy(
         isStreaming = false,
@@ -843,6 +879,128 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     genParamsStore.reset()
     _uiState.value = _uiState.value.copy(generationParams = GenerationParams())
     _uiState.value = _uiState.value.copy(statusNotice = "پارامترهای تولید به حالت امن پیش‌فرض بازگشتند.")
+  }
+
+  // --- Offline speech-to-text (real whisper.cpp pipeline) -------------------
+
+  fun loadWhisperModelFromUri(uri: Uri, fileName: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      val sizeBytes = queryModelSizeBytes(uri)
+      if (sizeBytes == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "اندازهٔ فایل مدل صوتی مشخص نیست؛ بارگذاری نشد.")
+        }
+        return@launch
+      }
+      val modelWeightsMb = ((sizeBytes + 1024 * 1024 - 1) / (1024 * 1024)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+      val preflight = resourceGuard.canSafelyLoadModel(modelWeightsMb, 1024)
+      if (!preflight.first) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = preflight.second)
+        }
+        return@launch
+      }
+
+      val pfd = try {
+        getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+      } catch (_: Exception) {
+        null
+      }
+      if (pfd == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "باز کردن فایل مدل صوتی ممکن نشد.")
+        }
+        return@launch
+      }
+
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(statusNotice = "در حال بارگذاری مدل Whisper…")
+      }
+
+      when (val outcome = asrEngine.loadFromFileDescriptor(pfd.detachFd(), labelHint = fileName)) {
+        is RealAsrEngine.LoadOutcome.Success -> {
+          val memMb = if (outcome.memoryDeltaKb >= 0) outcome.memoryDeltaKb / 1024 else -1
+          val memNote = if (memMb >= 0) " (${memMb} MB حافظهٔ اندازه‌گیری‌شده)" else ""
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+              asrModelLabel = outcome.modelLabel,
+              statusNotice = "مدل صوتی «${outcome.modelLabel}» بارگذاری شد.$memNote"
+            )
+          }
+        }
+        is RealAsrEngine.LoadOutcome.Failure -> {
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+              asrModelLabel = null,
+              statusNotice = "بارگذاری مدل صوتی ناموفق بود: ${outcome.reason}"
+            )
+          }
+        }
+      }
+    }
+  }
+
+  fun unloadWhisperModel() {
+    viewModelScope.launch(Dispatchers.IO) {
+      asrEngine.unload()
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(
+          asrModelLabel = null,
+          statusNotice = "مدل صوتی از حافظه خارج شد."
+        )
+      }
+    }
+  }
+
+  fun transcribeAudioUri(uri: Uri, fileName: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      if (!asrEngine.isLoaded) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(
+            statusNotice = "ابتدا یک مدل Whisper (GGUF) را وارد کنید تا رونویسی واقعی صوت فعال شود."
+          )
+        }
+        return@launch
+      }
+
+      _uiState.update { it.copy(isTranscribing = true, lastTranscription = null) }
+
+      val decoded = PcmDecoder.decodeTo16kMono(getApplication(), uri)
+      if (decoded == null) {
+        _uiState.update {
+          it.copy(isTranscribing = false, statusNotice = "فایل صوتی قابل رمزگشایی نبود یا مسیریاب صوتی ندارد: $fileName")
+        }
+        return@launch
+      }
+
+      when (val outcome = asrEngine.transcribe(
+        samples = decoded.samples,
+        nThreads = _uiState.value.generationParams.threads,
+        language = null,
+        translate = false
+      )) {
+        is RealAsrEngine.TranscribeOutcome.Success -> {
+          val minutes = (outcome.result.durationSeconds / 60).toInt()
+          val seconds = (outcome.result.durationSeconds % 60).toInt()
+          _uiState.update {
+            it.copy(
+              isTranscribing = false,
+              lastTranscription = outcome.result.text.ifBlank { "(متنی شناسایی نشد)" },
+              statusNotice = "رونویسی واقعی کامل شد — زبان: ${outcome.result.language} — طول صوت: ${minutes}:${seconds.toString().padStart(2, '0')}"
+            )
+          }
+        }
+        is RealAsrEngine.TranscribeOutcome.Failure -> {
+          _uiState.update {
+            it.copy(isTranscribing = false, statusNotice = "رونویسی ناموفق بود: ${outcome.reason}")
+          }
+        }
+      }
+    }
+  }
+
+  fun dismissTranscription() {
+    _uiState.value = _uiState.value.copy(lastTranscription = null)
   }
 
   fun toggleLanguage() {

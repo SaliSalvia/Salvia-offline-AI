@@ -50,6 +50,17 @@ class RealLlmEngineTest {
           request.onToken?.onToken("partial ")
           NativeGenerationResult("partial text", wasCancelled = true)
         }
+        "thinking" -> {
+          // Emits a reasoning block split across tokens, then the answer.
+          // Marker literals assembled from parts to keep tooling from mangling them.
+          val tOpen = "<" + "think" + ">"
+          val tClose = "</" + "think" + ">"
+          request.onToken?.onToken(tOpen + "step ")
+          request.onToken?.onToken("by step" + tClose)
+          request.onToken?.onToken("the ")
+          request.onToken?.onToken("result")
+          NativeGenerationResult(tOpen + "step by step" + tClose + "the result", wasCancelled = false)
+        }
         else -> {
           request.onToken?.onToken("Hello ")
           request.onToken?.onToken("world")
@@ -115,8 +126,9 @@ class RealLlmEngineTest {
     val deltas = mutableListOf<String>()
     val outcome = engine.generate(
       history = listOf(RealLlmEngine.ChatTurn("user", "سلام")),
-      params = GenerationParams()
-    ) { deltas.add(it) }
+      params = GenerationParams(),
+      onAnswer = { deltas.add(it) }
+    )
 
     assertTrue(outcome is RealLlmEngine.GenerateOutcome.Completed)
     outcome as RealLlmEngine.GenerateOutcome.Completed
@@ -163,6 +175,30 @@ class RealLlmEngineTest {
 
     assertTrue(outcome is RealLlmEngine.GenerateOutcome.Cancelled)
     assertEquals("partial text", (outcome as RealLlmEngine.GenerateOutcome.Cancelled).text)
+  }
+
+  @Test
+  fun `thinking models are split into reasoning and answer streams`() {
+    val backend = FakeBackend()
+    backend.generateMode = "thinking"
+    val engine = engineWith(backend)
+    engine.loadFromFileDescriptor(1)
+
+    val thinkingDeltas = mutableListOf<String>()
+    val answerDeltas = mutableListOf<String>()
+    val outcome = engine.generate(
+      history = listOf(RealLlmEngine.ChatTurn("user", "hi")),
+      params = GenerationParams(),
+      onThinking = { thinkingDeltas.add(it) },
+      onAnswer = { answerDeltas.add(it) }
+    )
+
+    assertTrue(outcome is RealLlmEngine.GenerateOutcome.Completed)
+    outcome as RealLlmEngine.GenerateOutcome.Completed
+    assertEquals("step by step", outcome.thinking)
+    assertEquals("the result", outcome.text)
+    assertEquals("step by step", thinkingDeltas.joinToString(""))
+    assertEquals("the result", answerDeltas.joinToString(""))
   }
 
   @Test

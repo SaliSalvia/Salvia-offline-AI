@@ -33,6 +33,7 @@ class RealLlmEngine(
   sealed class GenerateOutcome {
     data class Completed(
       val text: String,
+      val thinking: String,
       val promptTokens: Int,
       val promptMs: Long,
       val generatedTokens: Int,
@@ -40,7 +41,7 @@ class RealLlmEngine(
       val tokensPerSecond: Float
     ) : GenerateOutcome()
 
-    data class Cancelled(val text: String) : GenerateOutcome()
+    data class Cancelled(val text: String, val thinking: String) : GenerateOutcome()
 
     data class Failure(val reason: String) : GenerateOutcome()
   }
@@ -103,13 +104,15 @@ class RealLlmEngine(
   }
 
   /**
-   * Runs one chat turn. [onDelta] receives complete UTF-8 text pieces while the
-   * native engine is producing tokens; the full result is returned at the end.
+   * Runs one chat turn. Text is split live into reasoning and answer streams:
+   * [onThinking] receives `...` content, [onAnswer] receives the
+   * user-facing answer. Both always receive complete UTF-8 text pieces.
    */
   fun generate(
     history: List<ChatTurn>,
     params: GenerationParams,
-    onDelta: (String) -> Unit = {}
+    onThinking: (String) -> Unit = {},
+    onAnswer: (String) -> Unit = {}
   ): GenerateOutcome {
     if (!isLoaded) {
       return GenerateOutcome.Failure("no model loaded")
@@ -118,11 +121,27 @@ class RealLlmEngine(
       return GenerateOutcome.Failure("empty conversation")
     }
 
+    val parser = ThinkingStreamParser()
+    val fullThinking = StringBuilder()
+    val fullAnswer = StringBuilder()
+    fun dispatch(chunk: String) {
+      if (chunk.isEmpty()) return
+      val (thinking, answer) = parser.push(chunk)
+      if (thinking.isNotEmpty()) {
+        fullThinking.append(thinking)
+        onThinking(thinking)
+      }
+      if (answer.isNotEmpty()) {
+        fullAnswer.append(answer)
+        onAnswer(answer)
+      }
+    }
+
     val request = NativeChatRequest(
       roles = history.map { it.role },
       contents = history.map { it.content },
       params = params.sanitized(),
-      onToken = TokenListener { text -> if (text.isNotEmpty()) onDelta(text) }
+      onToken = TokenListener { text -> dispatch(text) }
     )
 
     val result = try {
@@ -131,17 +150,32 @@ class RealLlmEngine(
       return GenerateOutcome.Failure(t.message ?: "native generation failed")
     }
 
+    // Flush whatever the parser still holds (truncated markers become text).
+    val (tailThinking, tailAnswer) = parser.finish()
+    if (tailThinking.isNotEmpty()) {
+      fullThinking.append(tailThinking)
+      onThinking(tailThinking)
+    }
+    if (tailAnswer.isNotEmpty()) {
+      fullAnswer.append(tailAnswer)
+      onAnswer(tailAnswer)
+    }
+
     val stats = try {
       backend.lastStats()
     } catch (_: Throwable) {
       FloatArray(5)
     }
 
+    val answerText = fullAnswer.toString()
+    val thinkingText = fullThinking.toString()
+
     return if (result.wasCancelled) {
-      GenerateOutcome.Cancelled(result.text)
+      GenerateOutcome.Cancelled(answerText, thinkingText)
     } else {
       GenerateOutcome.Completed(
-        text = result.text,
+        text = answerText,
+        thinking = thinkingText,
         promptTokens = stats.getOrElse(0) { 0f }.toInt(),
         promptMs = stats.getOrElse(1) { 0f }.toLong(),
         generatedTokens = stats.getOrElse(2) { 0f }.toInt(),
