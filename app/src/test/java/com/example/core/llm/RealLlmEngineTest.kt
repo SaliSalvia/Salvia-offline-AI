@@ -48,6 +48,7 @@ class RealLlmEngineTest {
         "throws" -> throw RuntimeException("llama_decode failed during generation")
         "cancelled" -> {
           request.onToken?.onToken("partial ")
+          request.onToken?.onToken("text")
           NativeGenerationResult("partial text", wasCancelled = true)
         }
         "thinking" -> {
