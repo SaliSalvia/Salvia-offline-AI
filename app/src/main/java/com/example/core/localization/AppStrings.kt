@@ -13,14 +13,14 @@ object AppStrings {
   // App Title & Tagline
   fun appTitle(lang: AppLanguage) = "DeepGGUF"
   fun appSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
-    "ایستگاه کاری هوش مصنوعی محلی • بهینه‌شده برای Helio G100-Ultra و رم ۱۲GB"
+    "مدیریت مدل‌های روی دستگاه • پروفایل منابع بر اساس سخت‌افزار شناسایی‌شده"
   else
-    "Native On-Device AI Workstation • Tuned for Helio G100-Ultra & 12GB RAM"
+    "On-device model workspace • Resource profile based on detected hardware"
 
   fun drawerHeaderSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
-    "شیائومی ردمی نوت ۱۴ پرو • آفلاین محلی"
+    "مدل‌های محلی • وضعیت اجرا وابسته به runtime نصب‌شده"
   else
-    "Xiaomi Redmi Note 14 Pro • Pure Offline"
+    "Local models • Inference depends on an installed runtime"
 
   fun newChat(lang: AppLanguage) = if (lang == AppLanguage.FA) "+ گفت‌وگوی جدید" else "+ New Chat"
   fun recentSessions(lang: AppLanguage) = if (lang == AppLanguage.FA) "جلسات اخیر" else "Recent Chats"
@@ -114,16 +114,16 @@ object AppStrings {
 
   // Hardware Hub
   fun hardwareTitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
-    "مرکز پایش و توربو شیائومی (HyperOS)"
+    "پایش منابع و پایداری دستگاه"
   else
-    "Xiaomi HyperOS Hardware & Turbo Hub"
+    "Device Resources & Sustained Performance"
 
   fun hardwareSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
-    "پایش زنده دما، بار ممتد CPU، سهمیه رم و قانون سقف ۸۰٪"
+    "مصرف فرایند، حافظه آزاد و شدت حرارتی گزارش‌شده توسط Android"
   else
-    "Real-time thermal monitoring, sustained CPU load, RAM budget & 80% Safety Guard"
+    "App process use, available memory and Android thermal severity"
 
-  fun profileBeastTurbo(lang: AppLanguage) = if (lang == AppLanguage.FA) "حالت توربو بیست (Beast Turbo)" else "Beast Turbo Profile"
+  fun profileBeastTurbo(lang: AppLanguage) = if (lang == AppLanguage.FA) "حداکثر عملکردِ ایمن" else "Maximum safe performance"
   fun profileBalanced(lang: AppLanguage) = if (lang == AppLanguage.FA) "حالت متعادل (Balanced)" else "Balanced Profile"
   fun profileEcoBattery(lang: AppLanguage) = if (lang == AppLanguage.FA) "حالت مصرف بهینه (Eco Battery)" else "Eco Battery Profile"
 
@@ -154,10 +154,30 @@ object AppStrings {
     "Instant switch between Persian (RTL) and English (LTR)"
 
   fun airplaneModeTest(lang: AppLanguage) = if (lang == AppLanguage.FA)
-    "شبیه‌سازی حالت هواپیما (تأیید آفلاین ۱۰۰٪)"
+    "نشانگر رابط کاربریِ تست آفلاین"
   else
-    "Airplane Mode Test (Verify 100% Offline)"
+    "Offline test UI indicator (does not change network settings)"
 
   fun clearCache(lang: AppLanguage) = if (lang == AppLanguage.FA) "پاکسازی کش مدل‌ها" else "Clear Model Cache"
   fun userLevel(lang: AppLanguage) = if (lang == AppLanguage.FA) "سطح کاربری" else "User Experience Level"
+
+  // Generation parameters (real llama.cpp sampling knobs)
+  fun genParamsTitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
+    "پارامترهای تولید مدل"
+  else
+    "Model Generation Parameters"
+
+  fun genParamsSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
+    "کنترل دقیق دما، تنوع، طول پاسخ و بار پردازنده؛ همه در محدودهٔ امن دستگاه"
+  else
+    "Fine control of temperature, diversity, answer length and CPU load — all within safe device limits"
+
+  fun genTemperature(lang: AppLanguage) = if (lang == AppLanguage.FA) "دما (Temperature)" else "Temperature"
+  fun genTopP(lang: AppLanguage) = if (lang == AppLanguage.FA) "بریدن هسته‌ای (Top-p)" else "Nucleus sampling (Top-p)"
+  fun genTopK(lang: AppLanguage) = if (lang == AppLanguage.FA) "بریدن K تایی (Top-k)" else "Top-k"
+  fun genMaxTokens(lang: AppLanguage) = if (lang == AppLanguage.FA) "حداکثر توکن پاسخ" else "Max answer tokens"
+  fun genRepeatPenalty(lang: AppLanguage) = if (lang == AppLanguage.FA) "جریمهٔ تکرار" else "Repeat penalty"
+  fun genContext(lang: AppLanguage) = if (lang == AppLanguage.FA) "پنجرهٔ زمینه (Context)" else "Context window"
+  fun genThreads(lang: AppLanguage) = if (lang == AppLanguage.FA) "تعداد نخ پردازنده" else "CPU threads"
+  fun genReset(lang: AppLanguage) = if (lang == AppLanguage.FA) "بازگشت به پیش‌فرض امن" else "Reset to safe defaults"
 }

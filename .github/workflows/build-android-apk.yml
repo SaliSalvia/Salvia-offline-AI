@@ -1,0 +1,200 @@
+name: Android APK
+
+on:
+  push:
+    branches:
+      - arena/eef3a96d-salvia-offline-ai
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test and build installable APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          # Robolectric 4.16 running tests against Android SDK 36 requires Java 21.
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android 16 build platform
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      # NDK + CMake compile llama.cpp into libsalvia_llama.so (arm64-v8a).
+      - name: Restore cached NDK and CMake
+        id: restore-ndk
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.2.12479018
+            /usr/local/lib/android/sdk/cmake/3.22.1
+          key: android-ndk-27.2.12479018-cmake-3.22.1-v1
+
+      - name: Install NDK and CMake
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Save cached NDK and CMake
+        if: ${{ steps.restore-ndk.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.2.12479018
+            /usr/local/lib/android/sdk/cmake/3.22.1
+          key: android-ndk-27.2.12479018-cmake-3.22.1-v1
+
+      # llama.cpp + whisper.cpp are vendored at build time (pinned releases), never committed.
+      - name: Fetch llama.cpp and whisper.cpp sources
+        run: |
+          set -euo pipefail
+          LLAMA_VERSION="v0.6.0"
+          WHISPER_VERSION="v1.9.5"
+          mkdir -p app/src/main/cpp/llama.cpp app/src/main/cpp/whisper.cpp
+          curl -sSL "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/${LLAMA_VERSION}" \
+            | tar xz --strip-components=1 -C app/src/main/cpp/llama.cpp
+          curl -sSL "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/refs/tags/${WHISPER_VERSION}" \
+            | tar xz --strip-components=1 -C app/src/main/cpp/whisper.cpp
+          test -f app/src/main/cpp/llama.cpp/CMakeLists.txt
+          test -f app/src/main/cpp/whisper.cpp/CMakeLists.txt
+          echo "llama.cpp ${LLAMA_VERSION} + whisper.cpp ${WHISPER_VERSION} fetched"
+
+      - name: Set up Gradle caching
+        uses: gradle/actions/setup-gradle@v6
+
+      # Release signing keeps one stable app identity so future APKs upgrade in place on the
+      # phone. Preferred source is the KEYSTORE_B64/KEYSTORE_PASSWORD repository secrets.
+      # Without secrets, a keystore is generated once and kept in GitHub Actions cache; the
+      # private key is never committed to git. Cached keys may be evicted after long idle
+      # periods, which would require an uninstall/reinstall on the next upgrade.
+      - name: Prepare release signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p ci-runtime
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > ci-runtime/salvia-release.jks
+            echo "HAS_KEYSTORE_SECRET=1" >> "$GITHUB_ENV"
+            echo "Using release keystore from repository secrets."
+          else
+            echo "HAS_KEYSTORE_SECRET=0" >> "$GITHUB_ENV"
+            echo "Repository secrets not configured; using cached generated keystore."
+          fi
+
+      - name: Restore cached release keystore
+        id: restore-keystore
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-runtime/salvia-release.jks
+          key: salvia-release-keystore-v1
+
+      - name: Generate release keystore if missing
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' }}
+        run: |
+          if [ ! -f ci-runtime/salvia-release.jks ]; then
+            keytool -genkeypair -keystore ci-runtime/salvia-release.jks -storetype PKCS12 \
+              -alias salvia -keyalg RSA -keysize 2048 -validity 12500 \
+              -storepass salvia-offline-ai -keypass salvia-offline-ai \
+              -dname "CN=Salvia Offline AI, OU=Offline, O=Salvia, C=AT"
+          fi
+
+      - name: Save cached release keystore
+        if: ${{ env.HAS_KEYSTORE_SECRET == '0' && steps.restore-keystore.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ci-runtime/salvia-release.jks
+          key: salvia-release-keystore-v1
+
+      - name: Run unit tests
+        run: |
+          set +e
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest > gradle-test.log 2>&1
+          code=$?
+          cat gradle-test.log
+          if [ $code -ne 0 ]; then
+            {
+              grep -E '^e: ' gradle-test.log
+              awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-test.log
+              python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          for f in glob.glob('app/build/test-results/testDebugUnitTest/*.xml'):
+              root = ET.parse(f).getroot()
+              for tc in root.iter('testcase'):
+                  for child in tc:
+                      if child.tag in ('failure', 'error'):
+                          msg = (child.get('message') or child.text or '')[:400].replace('\n', ' ')
+                          print(f"FAILED {tc.get('classname')}.{tc.get('name')}: {msg}")
+          PY
+            } > gradle-tail.txt
+            if [ ! -s gradle-tail.txt ]; then tail -c 2500 gradle-test.log > gradle-tail.txt; fi
+            head -c 3000 gradle-tail.txt | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-annotation.txt
+            echo "::error title=Unit test step failed::$(cat gradle-annotation.txt)"
+            exit $code
+          fi
+
+      - name: Build release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/ci-runtime/salvia-release.jks
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'salvia-offline-ai' }}
+          KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'salvia-offline-ai' }}
+          KEY_ALIAS: salvia
+        run: |
+          set +e
+          ./gradlew --no-daemon --stacktrace assembleRelease > gradle-release.log 2>&1
+          code=$?
+          cat gradle-release.log
+          if [ $code -ne 0 ]; then
+            { grep -E '^e: ' gradle-release.log; awk '/\* What went wrong:/{keep=1} /\* Try:/{keep=0} keep' gradle-release.log; } > gradle-tail.txt
+            if [ ! -s gradle-tail.txt ]; then tail -c 2500 gradle-release.log > gradle-tail.txt; fi
+            head -c 3000 gradle-tail.txt | tr '\n' '\001' | sed 's/\r//g; s/%/%25/g; s/\001/%0A/g' > gradle-annotation.txt
+            echo "::error title=Release APK build step failed::$(cat gradle-annotation.txt)"
+            exit $code
+          fi
+
+      - name: Verify APK and create checksum
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+          sha256sum "$APK" > "$APK.sha256"
+          echo "== APK size =="
+          du -h "$APK"
+          echo "== Native libraries packaged in the APK =="
+          unzip -l "$APK" | grep -E '\.so$|lib/' || true
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsalvia_llama.so' \
+            || { echo "::error title=APK verification::libsalvia_llama.so missing from APK"; exit 1; }
+          echo "Native inference library is packaged."
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Salvia-offline-AI-release-apk
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/release/app-release.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
