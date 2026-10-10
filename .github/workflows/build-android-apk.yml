@@ -177,6 +177,13 @@ jobs:
           test -s "$APK"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
           sha256sum "$APK" > "$APK.sha256"
+          echo "== APK size =="
+          du -h "$APK"
+          echo "== Native libraries packaged in the APK =="
+          unzip -l "$APK" | grep -E '\.so$|lib/' || true
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libsalvia_llama.so' \
+            || { echo "::error title=APK verification::libsalvia_llama.so missing from APK"; exit 1; }
+          echo "Native inference library is packaged."
 
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
