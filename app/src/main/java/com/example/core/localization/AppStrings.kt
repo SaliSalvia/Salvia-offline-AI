@@ -160,4 +160,24 @@ object AppStrings {
 
   fun clearCache(lang: AppLanguage) = if (lang == AppLanguage.FA) "پاکسازی کش مدل‌ها" else "Clear Model Cache"
   fun userLevel(lang: AppLanguage) = if (lang == AppLanguage.FA) "سطح کاربری" else "User Experience Level"
+
+  // Generation parameters (real llama.cpp sampling knobs)
+  fun genParamsTitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
+    "پارامترهای تولید مدل"
+  else
+    "Model Generation Parameters"
+
+  fun genParamsSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
+    "کنترل دقیق دما، تنوع، طول پاسخ و بار پردازنده؛ همه در محدودهٔ امن دستگاه"
+  else
+    "Fine control of temperature, diversity, answer length and CPU load — all within safe device limits"
+
+  fun genTemperature(lang: AppLanguage) = if (lang == AppLanguage.FA) "دما (Temperature)" else "Temperature"
+  fun genTopP(lang: AppLanguage) = if (lang == AppLanguage.FA) "بریدن هسته‌ای (Top-p)" else "Nucleus sampling (Top-p)"
+  fun genTopK(lang: AppLanguage) = if (lang == AppLanguage.FA) "بریدن K تایی (Top-k)" else "Top-k"
+  fun genMaxTokens(lang: AppLanguage) = if (lang == AppLanguage.FA) "حداکثر توکن پاسخ" else "Max answer tokens"
+  fun genRepeatPenalty(lang: AppLanguage) = if (lang == AppLanguage.FA) "جریمهٔ تکرار" else "Repeat penalty"
+  fun genContext(lang: AppLanguage) = if (lang == AppLanguage.FA) "پنجرهٔ زمینه (Context)" else "Context window"
+  fun genThreads(lang: AppLanguage) = if (lang == AppLanguage.FA) "تعداد نخ پردازنده" else "CPU threads"
+  fun genReset(lang: AppLanguage) = if (lang == AppLanguage.FA) "بازگشت به پیش‌فرض امن" else "Reset to safe defaults"
 }

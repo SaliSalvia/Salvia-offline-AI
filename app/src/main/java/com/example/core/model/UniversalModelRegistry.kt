@@ -24,12 +24,17 @@ class UniversalModelRegistry(private val context: Context) {
     initializeDefaultProfiles()
   }
 
+  /**
+   * Catalog of *suggested* models. Nothing here is installed on the device:
+   * entries are recommendations the user can download elsewhere and import.
+   * No fake "loaded" state and no invented benchmark numbers.
+   */
   private fun initializeDefaultProfiles() {
     val presets = listOf(
       ModelMetadata(
         id = "preset_deepseek_r1_7b",
         fileName = "deepseek-r1-distill-qwen-7b.Q4_K_M.gguf",
-        filePath = "/storage/emulated/0/AIModels/deepseek-r1-distill-qwen-7b.Q4_K_M.gguf",
+        filePath = "",
         format = ModelFormat.GGUF,
         architecture = "qwen2",
         parameterCount = "7.6B",
@@ -39,15 +44,15 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 4670000000L,
         estimatedMemoryMb = 4900,
         capabilities = listOf(ModelCapability.TEXT, ModelCapability.CODE),
-        compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "کاملاً سازگار با معماری ARM64 و رم ۱۲ گیگابایتی Helio G100-Ultra",
-        isLoaded = true,
-        benchmarkTokPerSec = 19.4f
+        compatibility = CompatibilityLevel.LIMITED,
+        compatibilityReason = "پیشنهاد کاتالوگ: فایل روی دستگاه نیست. در صورت دانلود، برای رم‌های ۸ گیگابایتی با احتیاط و برای ۱۲ گیگابایتی مناسب است.",
+        isLoaded = false,
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_qwen_3b",
         fileName = "qwen2.5-3b-instruct.Q4_K_M.gguf",
-        filePath = "/storage/emulated/0/AIModels/qwen2.5-3b-instruct.Q4_K_M.gguf",
+        filePath = "",
         format = ModelFormat.GGUF,
         architecture = "qwen2",
         parameterCount = "3.1B",
@@ -58,14 +63,14 @@ class UniversalModelRegistry(private val context: Context) {
         estimatedMemoryMb = 2300,
         capabilities = listOf(ModelCapability.TEXT, ModelCapability.CODE),
         compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "فوق‌العاده سریع و سبک با کمترین تاخیر (Latency) روی پردازنده",
+        compatibilityReason = "پیشنهاد کاتالوگ: فایل روی دستگاه نیست. سبک‌ترین گزینهٔ پیشنهادی برای این گوشی؛ پس از دانلود و وارد کردن فایل GGUF اجرا می‌شود.",
         isLoaded = false,
-        benchmarkTokPerSec = 28.6f
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_vision_llama_32",
         fileName = "llama-3.2-11b-vision.Q4_0.gguf",
-        filePath = "/storage/emulated/0/AIModels/llama-3.2-11b-vision.Q4_0.gguf",
+        filePath = "",
         format = ModelFormat.GGUF,
         architecture = "mllama",
         parameterCount = "11B",
@@ -76,14 +81,14 @@ class UniversalModelRegistry(private val context: Context) {
         estimatedMemoryMb = 7500,
         capabilities = listOf(ModelCapability.VISION, ModelCapability.TEXT),
         compatibility = CompatibilityLevel.LIMITED,
-        compatibilityReason = "نیاز به حداقل ۸ گیگابایت رم خالی، توصیه می‌شود بقیه مدل‌ها بسته شوند",
+        compatibilityReason = "پیشنهاد کاتالوگ: فایل روی دستگاه نیست. بخش متنی از طریق llama.cpp قابل اجراست؛ ورودی تصویر در این نسخه پشتیبانی نمی‌شود.",
         isLoaded = false,
-        benchmarkTokPerSec = 11.2f
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_sd_diffusion",
         fileName = "stable-diffusion-v1.5-mobile.mnn",
-        filePath = "/storage/emulated/0/AIModels/sd-v1.5-mobile.mnn",
+        filePath = "",
         format = ModelFormat.MNN,
         architecture = "diffusion",
         parameterCount = "860M",
@@ -93,15 +98,15 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 1950000000L,
         estimatedMemoryMb = 2100,
         capabilities = listOf(ModelCapability.IMAGE_GENERATION),
-        compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "بهینه‌سازی‌شده برای شتاب‌دهنده Mali-G57 MC2 با استفاده از MNN OpenCL",
-        isLoaded = true,
-        benchmarkTokPerSec = 1.4f // steps per sec
+        compatibility = CompatibilityLevel.UNSUPPORTED,
+        compatibilityReason = "پیشنهاد کاتالوگ: موتور اجرای مدل‌های diffusion در این نسخه بسته‌بندی نشده است؛ فقط برای آشنایی فهرست شده.",
+        isLoaded = false,
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_whisper_small",
         fileName = "whisper-small-q5_1.bin",
-        filePath = "/storage/emulated/0/AIModels/whisper-small-q5_1.bin",
+        filePath = "",
         format = ModelFormat.GGUF,
         architecture = "whisper",
         parameterCount = "244M",
@@ -111,15 +116,15 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 482000000L,
         estimatedMemoryMb = 600,
         capabilities = listOf(ModelCapability.SPEECH_TO_TEXT),
-        compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "موتور تبدیل صوت آفلاین Whisper با پشتیبانی کامل از زبان فارسی و انگلیسی",
-        isLoaded = true,
-        benchmarkTokPerSec = 34.0f
+        compatibility = CompatibilityLevel.REQUIRES_CONVERSION,
+        compatibilityReason = "پیشنهاد کاتالوگ: موتور تبدیل صوت به متن در این نسخه اجرا نمی‌شود؛ فایلی بارگذاری نکنید.",
+        isLoaded = false,
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_kokoro_tts",
         fileName = "kokoro-v0_19-mobile.onnx",
-        filePath = "/storage/emulated/0/AIModels/kokoro-v0_19-mobile.onnx",
+        filePath = "",
         format = ModelFormat.ONNX,
         architecture = "style_tts",
         parameterCount = "82M",
@@ -129,15 +134,15 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 99000000L,
         estimatedMemoryMb = 180,
         capabilities = listOf(ModelCapability.TEXT_TO_SPEECH),
-        compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "موتور تولید گفتار زنده با کیفیت صدای طبیعی و بدون تاخیر",
-        isLoaded = true,
-        benchmarkTokPerSec = 50.0f
+        compatibility = CompatibilityLevel.REQUIRES_CONVERSION,
+        compatibilityReason = "پیشنهاد کاتالوگ: موتور تولید گفتار در این نسخه اجرا نمی‌شود؛ صدای خروجی فعلی از TTS سیستمی Android است.",
+        isLoaded = false,
+        benchmarkTokPerSec = null
       ),
       ModelMetadata(
         id = "preset_bge_m3_embedding",
         fileName = "bge-m3-multilingual.onnx",
-        filePath = "/storage/emulated/0/AIModels/bge-m3-multilingual.onnx",
+        filePath = "",
         format = ModelFormat.ONNX,
         architecture = "bert",
         parameterCount = "130M",
@@ -147,23 +152,15 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 293000000L,
         estimatedMemoryMb = 350,
         capabilities = listOf(ModelCapability.EMBEDDING),
-        compatibility = CompatibilityLevel.READY,
-        compatibilityReason = "تولید بردار امبدینگ چندزبانه برای بازیابی محلی اسناد (Local RAG)",
-        isLoaded = true,
-        benchmarkTokPerSec = 42.0f
+        compatibility = CompatibilityLevel.REQUIRES_CONVERSION,
+        compatibilityReason = "پیشنهاد کاتالوگ: بازیابی RAG فعلی از بردار هش محلی استفاده می‌کند و به این مدل نیاز ندارد.",
+        isLoaded = false,
+        benchmarkTokPerSec = null
       )
     )
 
     _storedModels.value = presets
-    val initialLoaded = mutableMapOf<ModelCapability, ModelMetadata>()
-    presets.filter { it.isLoaded }.forEach { model ->
-      model.capabilities.forEach { cap ->
-        if (!initialLoaded.containsKey(cap)) {
-          initialLoaded[cap] = model
-        }
-      }
-    }
-    _loadedModels.value = initialLoaded
+    _loadedModels.value = emptyMap()
   }
 
   suspend fun registerImportedFile(uri: Uri): ModelMetadata? = withContext(Dispatchers.IO) {
@@ -272,6 +269,10 @@ class UniversalModelRegistry(private val context: Context) {
 
   suspend fun loadModel(modelId: String, capability: ModelCapability): Boolean = withContext(Dispatchers.IO) {
     val model = _storedModels.value.find { it.id == modelId } ?: return@withContext false
+    // Catalog presets have no weights on this device; only imported files can load.
+    if (model.filePath.isBlank() || !model.filePath.startsWith("content:")) {
+      return@withContext false
+    }
     val safety = evaluateMemorySafety(model.estimatedMemoryMb)
     if (!safety.isSafeToLoad) {
       return@withContext false

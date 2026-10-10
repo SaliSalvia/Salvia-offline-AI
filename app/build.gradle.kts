@@ -14,10 +14,22 @@ android {
     applicationId = "com.aistudio.deepgguf.xqmorp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+    // The target device (Redmi Note 14 Pro class) is arm64-v8a only; shipping a
+    // single ABI keeps the APK small and the native build fast.
+    ndk {
+      abiFilters.add("arm64-v8a")
+    }
+    externalNativeBuild {
+      cmake {
+        arguments += listOf("-DANDROID_STL=c++_static")
+        cppFlags += "-std=c++17"
+      }
+    }
   }
 
   signingConfigs {
@@ -55,6 +67,13 @@ android {
     compose = true
     buildConfig = true
   }
+  externalNativeBuild {
+    cmake {
+      path = file("src/main/cpp/CMakeLists.txt")
+      version = "3.22.1"
+    }
+  }
+  ndkVersion = "27.2.12479018"
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false

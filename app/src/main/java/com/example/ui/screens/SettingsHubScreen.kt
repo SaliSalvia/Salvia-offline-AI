@@ -32,6 +32,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -49,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.filled.Translate
 import com.example.core.localization.AppLanguage
 import com.example.core.localization.AppStrings
+import com.example.core.llm.GenerationParams
 import com.example.ui.theme.BackgroundPitchBlack
 import com.example.ui.theme.NeonPinkContainer
 import com.example.ui.theme.NeonPinkLight
@@ -224,6 +227,111 @@ fun SettingsHubScreen(
 
     Spacer(modifier = Modifier.height(14.dp))
 
+    // 🎛️ Generation Parameters Card (real llama.cpp sampling knobs)
+    val genParams = uiState.generationParams
+    Card(
+      modifier = Modifier
+        .fillMaxWidth()
+        .testTag("generation_params_card"),
+      colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+      border = androidx.compose.foundation.BorderStroke(1.dp, NeonPinkPrimary.copy(alpha = 0.5f)),
+      shape = RoundedCornerShape(14.dp)
+    ) {
+      Column(modifier = Modifier.padding(14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Icon(Icons.Default.Tune, contentDescription = null, tint = NeonPinkPrimary, modifier = Modifier.size(18.dp))
+          Spacer(modifier = Modifier.width(6.dp))
+          Column {
+            Text(
+              text = AppStrings.genParamsTitle(uiState.appLanguage),
+              color = TextPrimary,
+              fontSize = 13.5.sp,
+              fontWeight = FontWeight.Bold
+            )
+            Text(
+              text = AppStrings.genParamsSubtitle(uiState.appLanguage),
+              color = TextSecondary,
+              fontSize = 11.sp
+            )
+          }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        ParamSlider(
+          label = AppStrings.genTemperature(uiState.appLanguage),
+          valueText = String.format(java.util.Locale.US, "%.2f", genParams.temperature),
+          value = genParams.temperature,
+          range = 0f..2f,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(temperature = it)) }
+        )
+        ParamSlider(
+          label = AppStrings.genTopP(uiState.appLanguage),
+          valueText = String.format(java.util.Locale.US, "%.2f", genParams.topP),
+          value = genParams.topP,
+          range = 0.05f..1f,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(topP = it)) }
+        )
+        ParamSlider(
+          label = AppStrings.genTopK(uiState.appLanguage),
+          valueText = genParams.topK.toString(),
+          value = genParams.topK.toFloat(),
+          range = 0f..100f,
+          steps = 99,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(topK = it.toInt())) }
+        )
+        ParamSlider(
+          label = AppStrings.genMaxTokens(uiState.appLanguage),
+          valueText = genParams.maxTokens.toString(),
+          value = genParams.maxTokens.toFloat(),
+          range = 16f..4096f,
+          steps = 124,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(maxTokens = it.toInt())) }
+        )
+        ParamSlider(
+          label = AppStrings.genRepeatPenalty(uiState.appLanguage),
+          valueText = String.format(java.util.Locale.US, "%.2f", genParams.repeatPenalty),
+          value = genParams.repeatPenalty,
+          range = 1f..2f,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(repeatPenalty = it)) }
+        )
+        ParamSlider(
+          label = AppStrings.genContext(uiState.appLanguage),
+          valueText = genParams.contextTokens.toString(),
+          value = genParams.contextTokens.toFloat(),
+          range = 512f..8192f,
+          steps = 30,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(contextTokens = it.toInt())) }
+        )
+        ParamSlider(
+          label = AppStrings.genThreads(uiState.appLanguage),
+          valueText = genParams.threads.toString(),
+          value = genParams.threads.toFloat(),
+          range = 1f..8f,
+          steps = 6,
+          onValueChange = { viewModel.updateGenerationParams(genParams.copy(threads = it.toInt())) }
+        )
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Button(
+          onClick = { viewModel.resetGenerationParams() },
+          colors = ButtonDefaults.buttonColors(containerColor = BackgroundPitchBlack),
+          border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceCardBorder),
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("reset_generation_params")
+        ) {
+          Icon(Icons.Default.CleaningServices, contentDescription = null, tint = NeonPinkLight, modifier = Modifier.size(16.dp))
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(AppStrings.genReset(uiState.appLanguage), color = TextPrimary, fontSize = 12.sp)
+        }
+      }
+    }
+
+    Spacer(modifier = Modifier.height(14.dp))
+
     // Airplane Mode Test Card
     Card(
       modifier = Modifier.fillMaxWidth(),
@@ -372,5 +480,44 @@ fun SettingsHubScreen(
         Text(text = "پشتیبانی از inference به runtime و فایل مدل معتبر نصب‌شده وابسته است.", color = TextTertiary, fontSize = 10.5.sp)
       }
     }
+  }
+}
+
+@Composable
+private fun ParamSlider(
+  label: String,
+  valueText: String,
+  value: Float,
+  range: ClosedFloatingPointRange<Float>,
+  onValueChange: (Float) -> Unit,
+  steps: Int = 0
+) {
+  Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+      Text(text = label, color = TextSecondary, fontSize = 11.5.sp)
+      Text(
+        text = valueText,
+        color = NeonPinkLight,
+        fontSize = 11.5.sp,
+        fontWeight = FontWeight.Bold
+      )
+    }
+    Slider(
+      value = value,
+      onValueChange = onValueChange,
+      valueRange = range,
+      steps = steps,
+      colors = SliderDefaults.colors(
+        thumbColor = NeonPinkPrimary,
+        activeTrackColor = NeonPinkPrimary,
+        inactiveTrackColor = SurfaceCardBorder
+      ),
+      modifier = Modifier
+        .fillMaxWidth()
+        .height(28.dp)
+    )
   }
 }

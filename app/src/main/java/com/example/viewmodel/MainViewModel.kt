@@ -7,6 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
 import com.example.core.localization.AppLanguage
+import com.example.core.llm.GenerationParams
+import com.example.core.llm.GenerationParamsStore
+import com.example.core.llm.NativeLlamaBackend
+import com.example.core.llm.RealLlmEngine
 import com.example.core.model.CompatibilityLevel
 import com.example.core.model.ModelCapability
 import com.example.core.model.ModelMetadata
@@ -94,6 +98,7 @@ data class ChatUiState(
   val advisorInsights: List<String> = emptyList(),
   val activeContextTokens: Int = 4096,
   val resourceSnapshot: ResourceSnapshot? = null,
+  val generationParams: GenerationParams = GenerationParams(),
   val appLanguage: AppLanguage = AppLanguage.FA
 )
 
@@ -107,6 +112,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val audioEngine = AudioEngine(application)
   val modelLruCache = ModelLruCache(maxLoadedModelsCount = 2, maxTotalMemoryMb = 8000)
   val resourceGuard = ResourceGuard(application, viewModelScope)
+
+  // Real offline inference (llama.cpp). PSS is sampled around model loads so the
+  // app can report honest memory numbers instead of guesses.
+  val llmEngine = RealLlmEngine(NativeLlamaBackend(), pssReader = { android.os.Debug.getPss() })
+  private val genParamsStore = GenerationParamsStore(prefs)
 
   private val _uiState = MutableStateFlow(ChatUiState())
   val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -126,7 +136,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   init {
     val savedLang = prefs.getString("app_language", "FA") ?: "FA"
     val initialLang = if (savedLang == "EN") AppLanguage.EN else AppLanguage.FA
-    _uiState.value = _uiState.value.copy(appLanguage = initialLang)
+    _uiState.value = _uiState.value.copy(
+      appLanguage = initialLang,
+      generationParams = genParamsStore.load()
+    )
 
     loadHardwareTelemetry()
     observeSessions()
@@ -391,7 +404,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           )
         } else {
           _uiState.value = _uiState.value.copy(
-            statusNotice = "بارگذاری متوقف شد: سقف امن رم AI اجازه بارگذاری نمی‌دهد."
+            statusNotice = "بارگذاری ممکن نشد: فایل واقعی مدل روی دستگاه در دسترس نیست یا حافظهٔ امن کافی نیست."
           )
         }
       }
@@ -441,46 +454,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return@launch
       }
 
-      val slot = if (targetSlot == "TEXT") {
-        LoadedSlotInfo(
-          id = "slot_text",
-          slotType = "TEXT",
-          modelName = if (parsed.isValid) parsed.modelName else fileName.removeSuffix(".gguf"),
-          architecture = parsed.architecture,
-          quantization = parsed.quantizationType,
-          contextLength = parsed.contextLength,
-          sizeFormatted = sizeFormatted,
-          uriString = uri.toString(),
-          isLoaded = true
-        )
-      } else {
-        LoadedSlotInfo(
-          id = "slot_image",
-          slotType = "IMAGE",
-          modelName = if (parsed.isValid) parsed.modelName else fileName.removeSuffix(".gguf"),
-          architecture = parsed.architecture,
-          quantization = parsed.quantizationType,
-          contextLength = parsed.contextLength,
-          sizeFormatted = sizeFormatted,
-          uriString = uri.toString(),
-          isLoaded = true
-        )
+      if (targetSlot != "TEXT") {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(
+            statusNotice = "تولید تصویر پیکسلی در این نسخه پشتیبانی نمی‌شود (موتور diffusion صادقانه‌ای بسته‌بندی نشده است). فایل GGUF انتخاب‌شده یک مدل متنی است و از همین بخش قابل اجراست."
+          )
+        }
+        return@launch
       }
 
-      // Warmup model in background
-      GgufInferenceEngine.warmupModel(slot)
+      // Real load through llama.cpp. The descriptor is passed straight to native
+      // code so multi-GB weights are memory-mapped, never copied.
+      val pfd = try {
+        getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+      } catch (_: Exception) {
+        null
+      }
+      if (pfd == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(
+            statusNotice = "باز کردن فایل مدل ممکن نشد؛ مدل بارگذاری نشد."
+          )
+        }
+        return@launch
+      }
 
       withContext(Dispatchers.Main) {
-        if (targetSlot == "TEXT") {
-          _uiState.value = _uiState.value.copy(
-            textSlotModel = slot,
-            statusNotice = "مدل متنی ${slot.modelName} بارگذاری و گرم شد."
+        _uiState.value = _uiState.value.copy(statusNotice = "در حال بارگذاری وزن‌های مدل… (ممکن است چند ثانیه طول بکشد)")
+      }
+
+      val outcome = llmEngine.loadFromFileDescriptor(pfd.detachFd())
+
+      when (outcome) {
+        is RealLlmEngine.LoadOutcome.Success -> {
+          val slot = LoadedSlotInfo(
+            id = "slot_text",
+            slotType = "TEXT",
+            modelName = outcome.modelName,
+            architecture = outcome.architecture.ifBlank { parsed.architecture },
+            quantization = parsed.quantizationType,
+            contextLength = if (outcome.contextTrain > 0) outcome.contextTrain else parsed.contextLength,
+            sizeFormatted = sizeFormatted,
+            uriString = uri.toString(),
+            isLoaded = true
           )
-        } else {
-          _uiState.value = _uiState.value.copy(
-            imageSlotModel = slot,
-            statusNotice = "مدل تصویرساز ${slot.modelName} آماده شد."
-          )
+          val memMb = if (outcome.memoryDeltaKb >= 0) outcome.memoryDeltaKb / 1024 else -1
+          val memNote = if (memMb >= 0) " حافظهٔ اندازه‌گیری‌شدهٔ اپ بعد از بارگذاری: ${memMb} مگابایت." else ""
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+              textSlotModel = slot,
+              statusNotice = "مدل «${slot.modelName}» بارگذاری شد و آمادهٔ استنتاج واقعی است.$memNote"
+            )
+          }
+        }
+        is RealLlmEngine.LoadOutcome.Failure -> {
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+              textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+              statusNotice = "بارگذاری مدل ناموفق بود: ${outcome.reason}"
+            )
+          }
         }
       }
     }
@@ -513,39 +546,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun setPresetTextModel(presetName: String, arch: String, quant: String, size: String) {
-    val model = LoadedSlotInfo(
-      id = "slot_text",
-      slotType = "TEXT",
-      modelName = presetName,
-      architecture = arch,
-      quantization = quant,
-      contextLength = 4096,
-      sizeFormatted = size,
-      isLoaded = true
-    )
-    viewModelScope.launch(Dispatchers.IO) {
-      GgufInferenceEngine.warmupModel(model)
-    }
+    // Catalog presets are recommendations only — no weights are bundled. Loading
+    // a fake entry would claim inference that cannot happen.
     _uiState.value = _uiState.value.copy(
-      textSlotModel = model,
-      statusNotice = "مدل فعال به $presetName تغییر یافت."
+      statusNotice = "«$presetName» فقط یک پیشنهاد کاتالوگ است و فایل آن روی دستگاه نیست. برای اجرای واقعی، فایل GGUF مدل را از حافظهٔ گوشی وارد کنید."
     )
   }
 
   fun setPresetImageModel(presetName: String, quant: String, size: String) {
-    val model = LoadedSlotInfo(
-      id = "slot_image",
-      slotType = "IMAGE",
-      modelName = presetName,
-      architecture = "stable-diffusion",
-      quantization = quant,
-      contextLength = 77,
-      sizeFormatted = size,
-      isLoaded = true
-    )
     _uiState.value = _uiState.value.copy(
-      imageSlotModel = model,
-      statusNotice = "مدل تصویرساز فعال به $presetName تغییر یافت."
+      statusNotice = "«$presetName» در این نسخه قابل اجرا نیست: موتور تولید تصویر پیکسلی واقعی بسته‌بندی نشده است."
     )
   }
 
@@ -610,57 +620,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     tokenBatcher.reset()
 
-    // 4. Background inference execution (Zero Main Thread work)
+    // 4. Real offline inference (llama.cpp) — history-aware, streamed, cancellable.
+    // The optimistic user message is already in state; history excludes it.
+    val priorMessages = _uiState.value.messages.dropLast(1)
+    val userContent = buildUserContentWithAttachments(trimmed, stagedFiles)
+
     viewModelScope.launch(Dispatchers.IO) {
       chatDao.insertMessage(userMsg)
 
       activeGenerationJob?.cancel()
       activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
-        val stream = GgufInferenceEngine.streamResponse(
-          context = getApplication(),
-          prompt = trimmed,
-          attachedFiles = stagedFiles,
-          textModel = _uiState.value.textSlotModel,
-          mode = _uiState.value.performanceMode
-        )
+        if (!llmEngine.isLoaded) {
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+              isStreaming = false,
+              statusNotice = "هیچ مدل متنی واقعی بارگذاری نشده است. از بخش «مدل‌ها» یک فایل GGUF وارد کنید تا استنتاج آفلاین واقعی فعال شود."
+            )
+          }
+          return@launch
+        }
 
-        var finalThinking = ""
-        var finalDurationMs = 0L
-        var finalTps = 0f
+        XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
+        val history = buildChatHistory(priorMessages, userContent)
 
-        stream.collect { chunk ->
-          finalThinking = chunk.fullThinkingText
-          finalDurationMs = chunk.elapsedMs
-          finalTps = chunk.tokensPerSecond
+        val outcome = llmEngine.generate(history, _uiState.value.generationParams) { delta ->
+          tokenBatcher.appendToken(delta)
+        }
 
-          // Flush thinking directly, and batch tokens in 30ms window to prevent UI thrashing
-          if (chunk.isThinking) {
+        when (outcome) {
+          is RealLlmEngine.GenerateOutcome.Failure -> {
+            tokenBatcher.reset()
             withContext(Dispatchers.Main) {
               _uiState.value = _uiState.value.copy(
-                liveThinking = finalThinking,
-                liveThinkingDurationMs = finalDurationMs,
-                liveTokensPerSecond = finalTps
-              )
-            }
-          } else {
-            tokenBatcher.appendToken(chunk.textDelta)
-            withContext(Dispatchers.Main) {
-              _uiState.value = _uiState.value.copy(
-                liveTokensPerSecond = finalTps
+                isStreaming = false,
+                statusNotice = "استنتاج ناموفق بود: ${outcome.reason}"
               )
             }
           }
+          else -> {
+            val finalFullAnswer = outcome.let {
+              when (it) {
+                is RealLlmEngine.GenerateOutcome.Completed -> it.text
+                is RealLlmEngine.GenerateOutcome.Cancelled -> it.text
+                else -> ""
+              }
+            }
+            val finalTps = (outcome as? RealLlmEngine.GenerateOutcome.Completed)?.tokensPerSecond ?: 0f
+            val wasCancelled = outcome is RealLlmEngine.GenerateOutcome.Cancelled
 
-          if (chunk.isFinished) {
             tokenBatcher.flushNow()
-            val finalFullAnswer = tokenBatcher.getAccumulated().ifEmpty { chunk.fullAnswerText }
+            val answerText = finalFullAnswer.ifEmpty { tokenBatcher.getAccumulated() }
 
             val assistantMsg = ChatMessageEntity(
               sessionId = session.id,
               role = "assistant",
-              content = finalFullAnswer,
-              thinkingContent = finalThinking.ifEmpty { null },
-              thinkingDurationMs = finalDurationMs,
+              content = if (wasCancelled) "$answerText\n\n(تولید توسط کاربر متوقف شد)" else answerText,
+              thinkingContent = null,
+              thinkingDurationMs = 0L,
               tokensPerSecond = finalTps
             )
             chatDao.insertMessage(assistantMsg)
@@ -674,13 +690,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
               _uiState.value = _uiState.value.copy(
                 isStreaming = false,
                 liveThinking = "",
-                liveAnswer = ""
+                liveAnswer = "",
+                liveTokensPerSecond = finalTps
               )
             }
           }
         }
       }
     }
+  }
+
+  /**
+   * Builds the model-facing user message: the prompt plus bounded excerpts of
+   * any attached files, so the real offline model can actually reason over them.
+   */
+  private fun buildUserContentWithAttachments(prompt: String, stagedFiles: List<AttachedFile>): String {
+    if (stagedFiles.isEmpty()) return prompt
+    val sb = StringBuilder(prompt)
+    for (f in stagedFiles) {
+      sb.append("\n\n[پیوست: ").append(f.fileName).append(" — ").append(f.sizeFormatted).append("]\n")
+      val body = f.fullTextSample?.take(6000)?.takeIf { it.isNotBlank() }
+        ?: f.extractedSummary.take(2000)
+      sb.append(body.ifBlank { "(محتوای متنی قابل استخراج نبود)" })
+    }
+    return sb.toString()
+  }
+
+  /**
+   * Maps persisted chat messages to the model's chat template input. History is
+   * bounded (recent turns, capped characters) to stay inside the context window.
+   */
+  private fun buildChatHistory(
+    priorMessages: List<ChatMessageEntity>,
+    userContent: String
+  ): List<RealLlmEngine.ChatTurn> {
+    val turns = ArrayList<RealLlmEngine.ChatTurn>(priorMessages.size + 1)
+    for (m in priorMessages.takeLast(12)) {
+      when (m.role) {
+        "user" -> turns.add(RealLlmEngine.ChatTurn("user", m.content.take(4000)))
+        "assistant" -> turns.add(RealLlmEngine.ChatTurn("assistant", m.content.take(4000)))
+      }
+    }
+    turns.add(RealLlmEngine.ChatTurn("user", userContent))
+    return turns
   }
 
   fun executeOfflineImageGeneration(sessionId: Long, promptText: String) {
@@ -759,6 +811,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun stopGeneration() {
+    llmEngine.cancel()
     activeGenerationJob?.cancel()
     activeGenerationJob = null
     cancelActiveImageGeneration()
@@ -776,6 +829,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun setLanguage(lang: AppLanguage) {
     prefs.edit().putString("app_language", lang.name).apply()
     _uiState.value = _uiState.value.copy(appLanguage = lang)
+  }
+
+  // --- Generation parameters (persisted, hardware-safe ranges) --------------
+
+  fun updateGenerationParams(params: GenerationParams) {
+    val sanitized = params.sanitized()
+    genParamsStore.save(sanitized)
+    _uiState.value = _uiState.value.copy(generationParams = sanitized)
+  }
+
+  fun resetGenerationParams() {
+    genParamsStore.reset()
+    _uiState.value = _uiState.value.copy(generationParams = GenerationParams())
+    _uiState.value = _uiState.value.copy(statusNotice = "پارامترهای تولید به حالت امن پیش‌فرض بازگشتند.")
   }
 
   fun toggleLanguage() {
