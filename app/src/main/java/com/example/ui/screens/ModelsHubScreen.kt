@@ -39,6 +39,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -129,6 +130,29 @@ fun ModelsHubScreen(
         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
         Text("وارد کردن مدل", fontSize = 12.sp)
+      }
+    }
+
+    // Live weight-loading progress from the native loader (mmap read).
+    val loadPercent = uiState.modelLoadPercent
+    if (loadPercent != null) {
+      Spacer(modifier = Modifier.height(10.dp))
+      Column {
+        Text(
+          text = "در حال بارگذاری وزن‌های مدل: $loadPercent٪",
+          color = NeonPinkLight,
+          fontSize = 11.5.sp
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        LinearProgressIndicator(
+          progress = { loadPercent / 100f },
+          modifier = Modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .testTag("model_load_progress"),
+          color = NeonPinkPrimary,
+          trackColor = SurfaceCardBorder
+        )
       }
     }
 

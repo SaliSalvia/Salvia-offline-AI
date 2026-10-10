@@ -65,15 +65,23 @@ class RealLlmEngine(
   fun isBackendAvailable(): Boolean = backend.isAvailable()
 
   /** Loads a GGUF model from a caller-owned file descriptor (consumed). */
-  fun loadFromFileDescriptor(fd: Int, gpuLayers: Int = 0): LoadOutcome {
+  fun loadFromFileDescriptor(
+    fd: Int,
+    gpuLayers: Int = 0,
+    onProgress: ((Float) -> Unit)? = null
+  ): LoadOutcome {
     val before = pssReader()
-    val error = backend.loadFromFd(fd, gpuLayers, null)
+    val error = backend.loadFromFd(fd, gpuLayers, onProgress?.let { p -> LoadListener { p(it) } })
     return finishLoad(error, before)
   }
 
-  fun loadFromPath(path: String, gpuLayers: Int = 0): LoadOutcome {
+  fun loadFromPath(
+    path: String,
+    gpuLayers: Int = 0,
+    onProgress: ((Float) -> Unit)? = null
+  ): LoadOutcome {
     val before = pssReader()
-    val error = backend.loadFromPath(path, gpuLayers, null)
+    val error = backend.loadFromPath(path, gpuLayers, onProgress?.let { p -> LoadListener { p(it) } })
     return finishLoad(error, before)
   }
 

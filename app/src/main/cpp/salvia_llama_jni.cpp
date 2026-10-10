@@ -14,6 +14,7 @@
 
 #include <android/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -42,6 +43,12 @@ int                     g_last_status = 0; // 0 = completed, 1 = cancelled
 
 // Last-run statistics: [promptTokens, promptMs, genTokens, genMs, tokensPerSec]
 float                   g_stats[5] = {0, 0, 0, 0, 0};
+
+// Token sequence currently stored in the KV cache (prompt + generated tokens)
+// so consecutive chat turns only decode the new suffix. Invalidated on load,
+// unload, context recreation, cancellation and errors.
+std::vector<llama_token> g_prev_tokens;
+bool                     g_prev_valid = false;
 
 struct Callbacks {
   JNIEnv *    env = nullptr;
@@ -222,6 +229,11 @@ bool run_generation(JNIEnv * env,
   }
   prompt_tokens.resize(static_cast<size_t>(got));
   stats.prompt_tokens = got;
+  if (prompt_tokens.empty()) {
+    g_prev_valid = false;
+    throw_runtime(env, "prompt produced no tokens");
+    return false;
+  }
 
   const int32_t n_train = llama_model_n_ctx_train(g_model);
   uint32_t want_ctx = n_ctx_req;
@@ -248,7 +260,9 @@ bool run_generation(JNIEnv * env,
     }
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = want_ctx;
-    cparams.n_batch = 512;
+    // Larger batches make prompt evaluation of long conversations much faster;
+    // capped by the context window and kept RAM-safe on mid-range devices.
+    cparams.n_batch = std::min<uint32_t>(1024, want_ctx);
     cparams.n_threads = n_threads > 0 ? n_threads : 4;
     cparams.n_threads_batch = cparams.n_threads;
     cparams.abort_callback = abort_callback_fn;
@@ -259,16 +273,40 @@ bool run_generation(JNIEnv * env,
       return false;
     }
     g_ctx_size = want_ctx;
+    g_prev_valid = false; // fresh KV cache
   } else {
     llama_set_n_threads(g_ctx, n_threads > 0 ? n_threads : 4,
                         n_threads > 0 ? n_threads : 4);
   }
 
-  // Fresh run: drop any KV state left from a previous conversation.
-  llama_memory_clear(llama_get_memory(g_ctx), true);
+  // --- KV-cache reuse across chat turns ----------------------------------
+  // The new prompt usually extends the previous conversation: keep the exact
+  // common token prefix in the KV cache and decode only the suffix. Any token
+  // mismatch falls back to a full evaluation automatically.
+  size_t reuse = 0;
+  if (g_prev_valid && !g_prev_tokens.empty()) {
+    while (reuse < g_prev_tokens.size() && reuse < prompt_tokens.size() &&
+           g_prev_tokens[reuse] == prompt_tokens[reuse]) {
+      reuse++;
+    }
+    // Always decode at least the final prompt token so its logits exist.
+    if (reuse >= prompt_tokens.size()) {
+      reuse = prompt_tokens.size() - 1;
+    }
+    // Drop previous KV entries at/after the reuse point (old turn tail).
+    if (!llama_memory_seq_rm(llama_get_memory(g_ctx), 0, (llama_pos) reuse, -1)) {
+      llama_memory_clear(llama_get_memory(g_ctx), true);
+      reuse = 0;
+    }
+  } else {
+    // Fresh run: drop any KV state left from a previous conversation.
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+    g_prev_valid = false;
+  }
 
   // --- sampler chain ------------------------------------------------------
   const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+  std::vector<llama_token> gen_tokens; // decoded generation tokens (for KV tracking)
   llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
   if (temperature <= 0.05f) {
     llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
@@ -285,13 +323,24 @@ bool run_generation(JNIEnv * env,
 
   auto finish = [&](bool completed) {
     llama_sampler_free(smpl);
+    if (completed) {
+      // Remember exactly what now lives in the KV cache for the next turn.
+      g_prev_tokens.assign(prompt_tokens.begin(), prompt_tokens.end());
+      g_prev_tokens.insert(g_prev_tokens.end(), gen_tokens.begin(), gen_tokens.end());
+      g_prev_valid = true;
+    } else {
+      g_prev_valid = false;
+    }
     return completed;
   };
 
-  // --- prompt prefill (chunked) ------------------------------------------
+  // --- prompt prefill (chunked, skipping the reused KV prefix) ------------
   const uint32_t n_batch = llama_n_batch(g_ctx);
+  for (size_t i = 0; i < reuse; i++) {
+    llama_sampler_accept(smpl, prompt_tokens[i]); // penalties see the kept prefix
+  }
   const auto t0 = clock::now();
-  for (size_t i = 0; i < prompt_tokens.size(); i += n_batch) {
+  for (size_t i = reuse; i < prompt_tokens.size(); i += n_batch) {
     if (g_cancel.load(std::memory_order_relaxed)) {
       stats.prompt_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
       return finish(false);
@@ -328,6 +377,8 @@ bool run_generation(JNIEnv * env,
       stats.gen_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
       return finish(true);
     }
+
+    gen_tokens.push_back(tok);
 
     char piece_buf[256];
     const int n_piece = llama_token_to_piece(vocab, tok, piece_buf,
@@ -421,6 +472,8 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromFd(JNIEnv * env, jclass,
       g_ctx_size = 0;
     }
   }
+  g_prev_tokens.clear();
+  g_prev_valid = false;
 
   Callbacks cb;
   cb.env = env;
@@ -481,6 +534,8 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromPath(JNIEnv * env, jclass,
       g_ctx_size = 0;
     }
   }
+  g_prev_tokens.clear();
+  g_prev_valid = false;
 
   const std::string path = jstring_to_std(env, jpath);
 
@@ -525,6 +580,8 @@ Java_com_example_core_llm_NativeLlama_nativeUnload(JNIEnv *, jclass) {
     llama_model_free(g_model);
     g_model = nullptr;
   }
+  g_prev_tokens.clear();
+  g_prev_valid = false;
   LOGI("model unloaded");
 }
 

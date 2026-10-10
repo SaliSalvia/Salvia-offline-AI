@@ -264,7 +264,7 @@ fun MainChatScreen(
 
           // Sessions List
           LazyColumn(modifier = Modifier.weight(1f)) {
-            items(uiState.sessions) { session ->
+            items(uiState.sessions, key = { it.id }) { session ->
               val isSelected = session.id == uiState.currentSession?.id
               Row(
                 modifier = Modifier

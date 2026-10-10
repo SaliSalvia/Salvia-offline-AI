@@ -100,6 +100,7 @@ data class ChatUiState(
   val isTranscribing: Boolean = false,
   val asrModelLabel: String? = null,
   val lastTranscription: String? = null,
+  val modelLoadPercent: Int? = null,
   val routerNotice: String? = null,
   val advisorInsights: List<String> = emptyList(),
   val activeContextTokens: Int = 4096,
@@ -496,7 +497,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(statusNotice = "در حال بارگذاری وزن‌های مدل… (ممکن است چند ثانیه طول بکشد)")
       }
 
-      val outcome = llmEngine.loadFromFileDescriptor(pfd.detachFd())
+      val outcome = llmEngine.loadFromFileDescriptor(pfd.detachFd()) { percent ->
+        val rounded = percent.toInt().coerceIn(0, 100)
+        _uiState.update { it.copy(modelLoadPercent = rounded) }
+        if (rounded % 10 == 0) {
+          _uiState.update { it.copy(statusNotice = "در حال بارگذاری وزن‌های مدل… $rounded٪") }
+        }
+      }
 
       when (outcome) {
         is RealLlmEngine.LoadOutcome.Success -> {
@@ -516,6 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = slot,
+              modelLoadPercent = null,
               statusNotice = "مدل «${slot.modelName}» بارگذاری شد و آمادهٔ استنتاج واقعی است.$memNote"
             )
           }
@@ -524,6 +532,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+              modelLoadPercent = null,
               statusNotice = "بارگذاری مدل ناموفق بود: ${outcome.reason}"
             )
           }

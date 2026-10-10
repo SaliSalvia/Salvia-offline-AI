@@ -1,21 +1,28 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# Salvia Offline AI — R8 rules.
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# The native layer looks up classes and methods BY NAME through JNI, so the
+# exact spellings below must survive shrinking/obfuscation.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# JNI entry points (static-style methods on Kotlin objects).
+-keep class com.example.core.llm.NativeLlama { *; }
+-keep class com.example.core.asr.NativeWhisper { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Anything with native methods keeps its name and its native members.
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# JNI upcalls use env->GetObjectClass + GetMethodID("onToken"/"onLoadProgress")
+# on callback objects — those interface method names must not be renamed.
+-keep interface com.example.core.llm.TokenListener { *; }
+-keep interface com.example.core.llm.LoadListener { *; }
+-keepclassmembers class * implements com.example.core.llm.TokenListener {
+    void onToken(java.lang.String);
+}
+-keepclassmembers class * implements com.example.core.llm.LoadListener {
+    void onLoadProgress(float);
+}
+
+# Readable crash reports without shipping source file paths.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

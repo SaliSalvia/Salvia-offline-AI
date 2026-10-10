@@ -51,7 +51,10 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      // R8 shrinking/obfuscation with JNI-safe keep rules (app/proguard-rules.pro):
+      // smaller APK, faster startup and dex loading on the target device.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.findByName("release")
     }

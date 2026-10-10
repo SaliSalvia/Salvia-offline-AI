@@ -53,13 +53,15 @@ object PcmDecoder {
       codec.start()
 
       // Accumulate raw PCM16 samples at the source rate/channels first.
-      val rawPcm = ArrayList<Short>(1 shl 16)
+      // Primitive growable buffer — never box millions of samples.
+      var rawPcm = ShortArray(1 shl 16)
+      var rawSize = 0
       val bufferInfo = MediaCodec.BufferInfo()
       var inputDone = false
       var outputDone = false
       val maxRawSamples = MAX_MINUTES * 60 * 48_000 // hard cap even for 48 kHz sources
 
-      while (!outputDone && rawPcm.size < maxRawSamples) {
+      while (!outputDone && rawSize < maxRawSamples) {
         if (!inputDone) {
           val inIndex = codec.dequeueInputBuffer(10_000)
           if (inIndex >= 0) {
@@ -81,9 +83,13 @@ object PcmDecoder {
             val outBuf = codec.getOutputBuffer(outIndex)!!
             if (bufferInfo.size > 0) {
               val pcm = outBuf.order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-              val count = min(pcm.remaining(), maxRawSamples - rawPcm.size)
-              for (i in 0 until count) {
-                rawPcm.add(pcm.get())
+              val count = min(pcm.remaining(), maxRawSamples - rawSize)
+              if (count > 0) {
+                if (rawSize + count > rawPcm.size) {
+                  rawPcm = rawPcm.copyOf(maxOf(rawPcm.size * 2, rawSize + count))
+                }
+                pcm.get(rawPcm, rawSize, count)
+                rawSize += count
               }
             }
             codec.releaseOutputBuffer(outIndex, false)
@@ -106,10 +112,10 @@ object PcmDecoder {
       } catch (_: Exception) {
       }
 
-      if (rawPcm.isEmpty()) return null
+      if (rawSize == 0) return null
 
       // Downmix to mono.
-      val mono = FloatArray(rawPcm.size / channels)
+      val mono = FloatArray(rawSize / channels)
       for (i in mono.indices) {
         var sum = 0f
         for (c in 0 until channels) {
