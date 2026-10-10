@@ -321,7 +321,7 @@ bool run_generation(JNIEnv * env,
     }
 
     // llama_sampler_sample() accepts the token into the chain internally.
-    const llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
+    llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
 
     if (llama_vocab_is_eog(vocab, tok)) {
       stats.gen_tokens = n_gen;
