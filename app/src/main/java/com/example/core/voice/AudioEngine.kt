@@ -5,19 +5,14 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.speech.tts.TextToSpeech
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.sin
 
-data class AudioTranscriptionResult(
-  val text: String,
-  val durationSeconds: Float,
-  val confidence: Float,
-  val language: String
-)
-
+/**
+ * Text-to-speech only (Android system TTS, offline). Speech-to-text is a real
+ * whisper.cpp pipeline in [com.example.core.asr.RealAsrEngine] — there is no
+ * simulated transcription anywhere in this app.
+ */
 class AudioEngine(private val context: Context) {
   private var tts: TextToSpeech? = null
   private var isTtsInitialized = false
@@ -31,17 +26,6 @@ class AudioEngine(private val context: Context) {
         isTtsInitialized = true
       }
     }
-  }
-
-  suspend fun transcribeAudio(audioBytesSize: Long, fileName: String): AudioTranscriptionResult = withContext(Dispatchers.Default) {
-    // Whisper offline transcription simulation / pipeline
-    delay(400) // Pacing for transcription
-    AudioTranscriptionResult(
-      text = "این یک متن نمونه استخراج‌شده از پرونده صوتی $fileName به صورت کاملاً آفلاین با موتور Whisper است.",
-      durationSeconds = (audioBytesSize / 32000f).coerceIn(1.5f, 45.0f),
-      confidence = 0.96f,
-      language = "Persian (fa)"
-    )
   }
 
   fun speakText(text: String, onFinished: (() -> Unit)? = null) {

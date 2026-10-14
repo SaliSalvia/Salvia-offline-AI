@@ -114,7 +114,7 @@ fun ImageHubScreen(
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "مبتنی بر مدل ${uiState.imageSlotModel.modelName} • ۱۰۰٪ محلی بدون اینترنت",
+          text = "پیش‌نمایش گرافیکی محلی؛ runtime واقعی Diffusion هنوز به این نسخه وصل نشده است.",
           color = TextSecondary,
           fontSize = 11.5.sp
         )
@@ -126,7 +126,7 @@ fun ImageHubScreen(
           .background(NeonPinkContainer)
           .padding(horizontal = 8.dp, vertical = 4.dp)
       ) {
-        Text(text = "Mali-G57 GPU", color = NeonPinkLight, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+        Text(text = "شتاب‌دهنده: تأییدنشده", color = NeonPinkLight, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
       }
     }
 

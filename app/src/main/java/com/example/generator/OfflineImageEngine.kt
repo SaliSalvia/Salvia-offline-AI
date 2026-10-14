@@ -26,8 +26,8 @@ data class GenerationProgress(
 object OfflineImageEngine {
 
   /**
-   * Generates a high quality neural stylized artwork offline using deterministic procedural
-   * latent synthesis matching the user prompt, style parameters, and aspect ratio.
+   * Generates a lightweight procedural preview locally. This is not a diffusion model and does
+   * not load the selected image-model slot.
    */
   suspend fun generateArtworkOffline(
     context: Context,
@@ -44,12 +44,10 @@ object OfflineImageEngine {
     val random = Random(seed xor prompt.hashCode().toLong())
 
     val promptLower = prompt.lowercase()
-    val isPortrait = promptLower.contains("زن") || promptLower.contains("مرد") || promptLower.contains("چهره") || promptLower.contains("portrait") || promptLower.contains("girl") || promptLower.contains("person")
-    val isLandscape = promptLower.contains("طبیعت") || promptLower.contains("کوه") || promptLower.contains("شهر") || promptLower.contains("landscape") || promptLower.contains("city")
     val isCyberpunk = promptLower.contains("سایبر") || promptLower.contains("نئون") || promptLower.contains("تکنولوژی") || promptLower.contains("cyber") || artStyle.contains("Cyberpunk")
 
-    // Stage 1: Latent noise sampling
-    onProgress(GenerationProgress(1, steps, "نمونه‌برداری از نویز اولیه در فضای نهان (Latent Space)..."))
+    // Stage 1: Prepare the procedural preview canvas.
+    onProgress(GenerationProgress(1, steps, "آماده‌سازی بوم تصویر محلی..."))
     delay(120)
 
     // Base background gradient
@@ -67,13 +65,13 @@ object OfflineImageEngine {
     val bgPaint = Paint().apply { shader = baseGrad }
     canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-    // Stage 2: U-Net Denoising loop
+    // Stage 2: Draw simple procedural preview layers (no neural model inference).
     val stages = listOf(
-      "حذف نویز در لایه U-Net ResBlock 1 (هدایت متنی Cross-Attention)...",
-      "محاسبه بردارهای ویژگی در لایه میانی انکودر...",
-      "تفکیک نورپردازی و کنتراست داینامیک مشکی-صورتی نئونی...",
-      "ترکیب لایه‌های ادراکی با هدایت CFG Scale 7.5...",
-      "تولید بافت‌های نهایی و جزئیات فوق‌العاده با رزولوشن بالا..."
+      "ترسیم زمینهٔ گرادیانی...",
+      "رسم خطوط و شکل‌های هندسی...",
+      "ترکیب رنگ‌های انتخاب‌شده...",
+      "تکمیل جزئیات گرافیکی...",
+      "آماده‌سازی پیش‌نمایش..."
     )
 
     for (step in 2..steps) {
@@ -90,7 +88,7 @@ object OfflineImageEngine {
       val cy = height / 2f + (random.nextFloat() - 0.5f) * 100
       val radius = 180f + (step * 8f)
 
-      if (isCyberpunk || true) {
+      if (isCyberpunk) {
         // Glowing Neon Pink or Cyber Violet Aura
         val glowShader = RadialGradient(
           cx, cy, radius,
@@ -170,8 +168,8 @@ object OfflineImageEngine {
       canvas.drawCircle(rx, ry, 16f, ringPaint)
     }
 
-    // Final Stage: VAE Decode to file
-    onProgress(GenerationProgress(steps, steps, "رمزگشایی تصویر با VAE و بهینه‌سازی رنگ‌ها..."))
+    // Final Stage: encode the procedural preview as a local PNG.
+    onProgress(GenerationProgress(steps, steps, "ذخیرهٔ تصویر محلی..."))
     delay(100)
 
     val outputFile = File(context.filesDir, "gen_ai_${System.currentTimeMillis()}.png")

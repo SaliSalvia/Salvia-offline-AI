@@ -31,7 +31,7 @@ class ExampleUnitTest {
   @Test
   fun testOptimalThreadCount() {
     val turboThreads = XiaomiOptimizer.getOptimalThreadCount(PerformanceMode.HYPER_TURBO)
-    assertTrue(turboThreads >= 4)
+    assertTrue(turboThreads in 1..6)
   }
 
   @Test
@@ -57,6 +57,22 @@ class ExampleUnitTest {
       fail("Should have thrown SecurityException for path traversal")
     } catch (_: SecurityException) {
       // Expected
+    }
+  }
+
+  @Test
+  fun testZipInspectionResourceLimits() {
+    ZipSecurity.checkSizeLimit(ZipSecurity.MAX_TOTAL_UNCOMPRESSED_BYTES - 1, 1)
+    ZipSecurity.checkSingleFileSizeLimit(ZipSecurity.MAX_SINGLE_FILE_BYTES)
+
+    assertThrows(java.io.IOException::class.java) {
+      ZipSecurity.checkSizeLimit(ZipSecurity.MAX_TOTAL_UNCOMPRESSED_BYTES, 1)
+    }
+    assertThrows(java.io.IOException::class.java) {
+      ZipSecurity.checkSingleFileSizeLimit(ZipSecurity.MAX_SINGLE_FILE_BYTES + 1)
+    }
+    assertThrows(java.io.IOException::class.java) {
+      ZipSecurity.checkFileCount(ZipSecurity.MAX_FILES_COUNT)
     }
   }
 

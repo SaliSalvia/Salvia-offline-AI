@@ -70,14 +70,17 @@ fun VoiceHubScreen(
 ) {
   val uiState by viewModel.uiState.collectAsState()
   var ttsInputText by remember { mutableStateOf("درود! موتور هوش مصنوعی صوتی آفلاین DeepGGUF آماده تبدیل متن شما به گفتار طبیعی بدون نیاز به اینترنت است.") }
-  var transcriptionResult by remember { mutableStateOf<String?>(null) }
+
+  val whisperModelPicker = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenDocument()
+  ) { uri: Uri? ->
+    uri?.let { viewModel.loadWhisperModelFromUri(it, it.lastPathSegment ?: "whisper-model.gguf") }
+  }
 
   val audioPicker = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.OpenDocument()
   ) { uri: Uri? ->
-    uri?.let {
-      transcriptionResult = "فایل صوتی بارگذاری شده با موفقیت با مدل محلی Whisper Small رونویسی شد:\n«این یک نمونه متن فارسی استخراج‌شده به صورت کاملاً آفلاین است.»"
-    }
+    uri?.let { viewModel.transcribeAudioUri(it, it.lastPathSegment ?: "audio") }
   }
 
   Column(
@@ -101,7 +104,7 @@ fun VoiceHubScreen(
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "تبدیل صوت به متن (Whisper) و متن به گفتار (Kokoro/Piper)",
+          text = "تبدیل صوت به متن (Whisper واقعی) و متن به گفتار (TTS سیستمی)",
           color = TextSecondary,
           fontSize = 12.sp
         )
@@ -138,7 +141,7 @@ fun VoiceHubScreen(
             Text(text = "تبدیل متن به گفتار (Text-to-Speech)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
           }
 
-          Text(text = "مدل Kokoro-TTS v0.19", color = NeonPinkLight, fontSize = 11.sp)
+          Text(text = "TTS سیستمی Android (آفلاین)", color = NeonPinkLight, fontSize = 11.sp)
         }
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -214,13 +217,17 @@ fun VoiceHubScreen(
             Text(text = "تبدیل صوت به متن (Whisper STT)", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
           }
 
-          Text(text = "مدل Whisper Small Q5", color = TurboActiveGreen, fontSize = 11.sp)
+          Text(
+            text = uiState.asrModelLabel?.let { "مدل: $it" } ?: "بدون مدل",
+            color = if (uiState.asrModelLabel != null) TurboActiveGreen else TextTertiary,
+            fontSize = 11.sp
+          )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
 
         Text(
-          text = "فایل صوتی خود (WAV, MP3, M4A) را برای رونویسی ۱۰۰٪ آفلاین وارد کنید:",
+          text = "برای رونویسی واقعی، ابتدا یک مدل Whisper با فرمت GGUF (مثلاً whisper-base یا whisper-small) وارد کنید؛ سپس فایل صوتی (WAV, MP3, M4A) را انتخاب کنید.",
           color = TextSecondary,
           fontSize = 12.sp
         )
@@ -228,17 +235,43 @@ fun VoiceHubScreen(
         Spacer(modifier = Modifier.height(10.dp))
 
         Button(
-          onClick = { audioPicker.launch(arrayOf("audio/*")) },
+          onClick = { whisperModelPicker.launch(arrayOf("*/*")) },
           colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardBorder),
           shape = RoundedCornerShape(10.dp),
-          modifier = Modifier.fillMaxWidth()
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("load_whisper_model_button")
         ) {
           Icon(Icons.Default.UploadFile, contentDescription = null, tint = NeonPinkLight)
           Spacer(modifier = Modifier.width(8.dp))
-          Text("انتخاب فایل صوتی برای پیاده‌سازی متنی", color = TextPrimary, fontSize = 12.5.sp)
+          Text(
+            text = if (uiState.asrModelLabel == null) "وارد کردن مدل Whisper (GGUF)" else "تغییر مدل Whisper",
+            color = TextPrimary,
+            fontSize = 12.5.sp
+          )
         }
 
-        if (transcriptionResult != null) {
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Button(
+          onClick = { audioPicker.launch(arrayOf("audio/*")) },
+          enabled = uiState.asrModelLabel != null && !uiState.isTranscribing,
+          colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardBorder),
+          shape = RoundedCornerShape(10.dp),
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("transcribe_audio_button")
+        ) {
+          Icon(Icons.Default.Mic, contentDescription = null, tint = NeonPinkLight)
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(
+            text = if (uiState.isTranscribing) "در حال رونویسی واقعی…" else "انتخاب فایل صوتی برای رونویسی",
+            color = TextPrimary,
+            fontSize = 12.5.sp
+          )
+        }
+
+        if (uiState.lastTranscription != null) {
           Spacer(modifier = Modifier.height(12.dp))
           Box(
             modifier = Modifier
@@ -246,9 +279,10 @@ fun VoiceHubScreen(
               .clip(RoundedCornerShape(8.dp))
               .background(BackgroundPitchBlack)
               .padding(10.dp)
+              .testTag("transcription_result")
           ) {
             Text(
-              text = transcriptionResult ?: "",
+              text = uiState.lastTranscription ?: "",
               color = NeonPinkLight,
               fontSize = 12.sp,
               lineHeight = 18.sp
