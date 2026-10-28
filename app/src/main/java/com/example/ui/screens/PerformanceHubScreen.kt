@@ -79,28 +79,32 @@ fun PerformanceHubScreen(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Column {
+      Column(modifier = Modifier.weight(1f)) {
         Text(
-          text = "داشبورد سخت‌افزار و بنچمارک (Hardware Profiler)",
+          text = "داشبورد سخت‌افزار",
           color = TextPrimary,
-          fontSize = 18.5.sp,
+          fontSize = 19.sp,
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "پایش حافظهٔ فرایند، مصرف CPU اپ و وضعیت حرارتی گزارش‌شده توسط Android",
+          text = "پایش حافظه، مصرف CPU و وضعیت حرارتی گزارش‌شده توسط Android",
           color = TextSecondary,
-          fontSize = 12.sp
+          fontSize = 11.5.sp,
+          lineHeight = 17.sp
         )
       }
+
+      Spacer(modifier = Modifier.width(10.dp))
 
       Button(
         onClick = { viewModel.loadHardwareTelemetry() },
         colors = ButtonDefaults.buttonColors(containerColor = SurfaceCard),
-        shape = RoundedCornerShape(10.dp)
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 8.dp)
       ) {
         Icon(Icons.Default.Refresh, contentDescription = null, tint = NeonPinkPrimary, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
-        Text("بروزرسانی", color = TextPrimary, fontSize = 11.5.sp)
+        Text("بروزرسانی", color = TextPrimary, fontSize = 11.sp)
       }
     }
 
@@ -154,6 +158,106 @@ fun PerformanceHubScreen(
           fontSize = 11.5.sp
         )
         Text(text = "سیستم‌عامل: ${profile?.androidVersion ?: "نامشخص"} • نسخهٔ HyperOS: ${uiState.telemetry?.hyperOsVersion ?: "نامشخص"}", color = TextSecondary, fontSize = 11.5.sp)
+      }
+    }
+
+    val tuning = uiState.deviceTuning
+    if (tuning?.isTargetDevice == true) {
+      Spacer(modifier = Modifier.height(14.dp))
+
+      Card(
+        modifier = Modifier
+          .fillMaxWidth()
+          .testTag("device_tuning_card"),
+        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
+        border = androidx.compose.foundation.BorderStroke(1.dp, NeonPinkPrimary.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(14.dp)
+      ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+              modifier = Modifier
+                .size(34.dp)
+                .clip(CircleShape)
+                .background(NeonPinkPrimary.copy(alpha = 0.15f)),
+              contentAlignment = Alignment.Center
+            ) {
+              Icon(Icons.Default.Speed, contentDescription = null, tint = NeonPinkPrimary, modifier = Modifier.size(19.dp))
+            }
+            Spacer(modifier = Modifier.width(9.dp))
+            Column {
+              Text(
+                text = "تنظیم اختصاصی این گوشی",
+                color = TextPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Bold
+              )
+              Text(
+                text = tuning.deviceLabel,
+                color = TextSecondary,
+                fontSize = 10.5.sp
+              )
+            }
+          }
+
+          Spacer(modifier = Modifier.height(12.dp))
+
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            listOf(
+              "تولید" to "${tuning.generationThreads} نخ",
+              "پردازش پرامپت" to "${tuning.promptThreads} نخ",
+              "Context" to "${tuning.contextTokens}"
+            ).forEach { (label, value) ->
+              Box(
+                modifier = Modifier
+                  .weight(1f)
+                  .clip(RoundedCornerShape(8.dp))
+                  .background(BackgroundPitchBlack)
+                  .padding(horizontal = 7.dp, vertical = 8.dp)
+              ) {
+                Column {
+                  Text(text = label, color = TextSecondary, fontSize = 9.5.sp)
+                  Text(
+                    text = value,
+                    color = NeonPinkLight,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                  )
+                }
+              }
+            }
+          }
+
+          Spacer(modifier = Modifier.height(10.dp))
+
+          Text(
+            text = tuning.recommendedModel,
+            color = TextPrimary,
+            fontSize = 11.5.sp,
+            lineHeight = 17.sp
+          )
+
+          Spacer(modifier = Modifier.height(8.dp))
+
+          tuning.notes.forEach { note ->
+            Row(
+              modifier = Modifier.padding(bottom = 4.dp),
+              verticalAlignment = Alignment.Top
+            ) {
+              Text(text = "•", color = NeonPinkPrimary, fontSize = 12.sp)
+              Spacer(modifier = Modifier.width(5.dp))
+              Text(
+                text = note,
+                color = TextTertiary,
+                fontSize = 10.5.sp,
+                lineHeight = 16.sp
+              )
+            }
+          }
+        }
       }
     }
 
@@ -244,7 +348,7 @@ fun PerformanceHubScreen(
               .padding(8.dp)
           ) {
             Column {
-              Text(text = "حافظهٔ فرایند اپ", color = TextSecondary, fontSize = 10.sp)
+              Text(text = "فشار حافظهٔ سیستم", color = TextSecondary, fontSize = 10.sp)
               Text(
                 text = "${guardSnap?.ramUsagePctOfBudget ?: 0}% / 80%",
                 color = if ((guardSnap?.ramUsagePctOfBudget ?: 0) >= 80) PerformanceBeastRed else TextPrimary,

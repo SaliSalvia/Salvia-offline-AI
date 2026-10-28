@@ -8,8 +8,8 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
@@ -26,7 +26,7 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
-      val uiState by viewModel.uiState.collectAsState()
+      val uiState by viewModel.uiState.collectAsStateWithLifecycle()
       val layoutDirection = if (uiState.appLanguage == AppLanguage.FA) {
         LayoutDirection.Rtl
       } else {

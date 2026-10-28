@@ -116,8 +116,8 @@ class UniversalModelRegistry(private val context: Context) {
         fileSizeBytes = 482000000L,
         estimatedMemoryMb = 600,
         capabilities = listOf(ModelCapability.SPEECH_TO_TEXT),
-        compatibility = CompatibilityLevel.REQUIRES_CONVERSION,
-        compatibilityReason = "پیشنهاد کاتالوگ: موتور تبدیل صوت به متن در این نسخه اجرا نمی‌شود؛ فایلی بارگذاری نکنید.",
+        compatibility = CompatibilityLevel.LIMITED,
+        compatibilityReason = "پیشنهاد کاتالوگ: فایل روی دستگاه نیست. Whisper GGUF را از بخش «صوت» وارد کنید؛ این بخش از whisper.cpp واقعی استفاده می‌کند.",
         isLoaded = false,
         benchmarkTokPerSec = null
       ),
@@ -249,6 +249,15 @@ class UniversalModelRegistry(private val context: Context) {
       isLoaded = false
     )
 
+    // Re-importing the same document must update one row, not create duplicate
+    // entries that point at the same weights.
+    val previous = _storedModels.value.find { it.filePath == uri.toString() }
+    if (previous != null) {
+      val refreshed = imported.copy(id = previous.id, isLoaded = previous.isLoaded)
+      _storedModels.value = listOf(refreshed) + _storedModels.value.filter { it.id != previous.id }
+      return@withContext refreshed
+    }
+
     _storedModels.value = listOf(imported) + _storedModels.value
     imported
   }
@@ -257,53 +266,44 @@ class UniversalModelRegistry(private val context: Context) {
     val actMan = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
     val memInfo = ActivityManager.MemoryInfo()
     actMan?.getMemoryInfo(memInfo)
-    val availMb = (memInfo.availMem / (1024 * 1024)).toInt()
+    val totalMb = (memInfo.totalMem / (1024 * 1024)).toInt()
+    if (totalMb <= 0 || modelMb <= 0) return MemorySafetyStatus.HIGH
 
+    // GGUF weights are mmap-backed, so this is a pressure estimate relative to the
+    // whole device, not a promise that the file must be copied into anonymous RAM.
+    val ratio = modelMb.toFloat() / totalMb
     return when {
-      modelMb > availMb * 0.9 -> MemorySafetyStatus.CRITICAL
-      modelMb > availMb * 0.75 -> MemorySafetyStatus.HIGH
-      modelMb > availMb * 0.55 -> MemorySafetyStatus.WARNING
+      ratio > 0.80f -> MemorySafetyStatus.CRITICAL
+      ratio > 0.65f -> MemorySafetyStatus.HIGH
+      ratio > 0.50f -> MemorySafetyStatus.WARNING
       else -> MemorySafetyStatus.SAFE
     }
   }
 
-  suspend fun loadModel(modelId: String, capability: ModelCapability): Boolean = withContext(Dispatchers.IO) {
-    val model = _storedModels.value.find { it.id == modelId } ?: return@withContext false
-    // Catalog presets have no weights on this device; only imported files can load.
-    if (model.filePath.isBlank() || !model.filePath.startsWith("content:")) {
-      return@withContext false
+  /** Marks a model as active only after the native llama.cpp load actually succeeded. */
+  fun markModelLoadedByUri(uriString: String, capability: ModelCapability): ModelMetadata? {
+    val model = _storedModels.value.find { it.filePath == uriString } ?: return null
+    _storedModels.value = _storedModels.value.map {
+      if (it.id == model.id) it.copy(isLoaded = true) else it.copy(isLoaded = false)
     }
-    val safety = evaluateMemorySafety(model.estimatedMemoryMb)
-    if (!safety.isSafeToLoad) {
-      return@withContext false
-    }
-
-    // Unload existing model on that capability slot if any
-    val current = _loadedModels.value[capability]
-    if (current != null) {
-      unloadModel(current.id)
-    }
-
-    val updatedStored = _storedModels.value.map {
-      if (it.id == modelId) it.copy(isLoaded = true) else it
-    }
-    _storedModels.value = updatedStored
-
-    val newLoadedMap = _loadedModels.value.toMutableMap()
-    newLoadedMap[capability] = model.copy(isLoaded = true)
-    _loadedModels.value = newLoadedMap
-    true
+    _loadedModels.value = mapOf(capability to model.copy(isLoaded = true))
+    return model.copy(isLoaded = true)
   }
 
-  suspend fun unloadModel(modelId: String) = withContext(Dispatchers.IO) {
-    val updatedStored = _storedModels.value.map {
+  fun markModelLoaded(modelId: String, capability: ModelCapability): Boolean {
+    val model = _storedModels.value.find { it.id == modelId } ?: return false
+    _storedModels.value = _storedModels.value.map {
+      if (it.id == modelId) it.copy(isLoaded = true) else it.copy(isLoaded = false)
+    }
+    _loadedModels.value = mapOf(capability to model.copy(isLoaded = true))
+    return true
+  }
+
+  fun unloadModel(modelId: String) {
+    _storedModels.value = _storedModels.value.map {
       if (it.id == modelId) it.copy(isLoaded = false) else it
     }
-    _storedModels.value = updatedStored
-
-    val newLoadedMap = _loadedModels.value.toMutableMap()
-    newLoadedMap.entries.removeIf { it.value.id == modelId }
-    _loadedModels.value = newLoadedMap
+    _loadedModels.value = _loadedModels.value.filterValues { it.id != modelId }
   }
 
   fun getLoadedModelForCapability(capability: ModelCapability): ModelMetadata? {

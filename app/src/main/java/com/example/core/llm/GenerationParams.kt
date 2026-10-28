@@ -19,15 +19,23 @@ data class GenerationParams(
   val threads: Int = DEFAULT_THREADS
 ) {
 
-  fun sanitized(): GenerationParams = copy(
-    temperature = temperature.coerceIn(0f, 2f),
-    topP = topP.coerceIn(0.05f, 1f),
-    topK = topK.coerceIn(0, 200),
-    maxTokens = maxTokens.coerceIn(16, 4096),
-    repeatPenalty = repeatPenalty.coerceIn(1f, 2f),
-    contextTokens = contextTokens.coerceIn(512, 8192),
-    threads = threads.coerceIn(1, 8)
-  )
+  fun sanitized(): GenerationParams {
+    val safeContext = contextTokens.coerceIn(512, 8192)
+    // Keep at least a quarter of the window for the prompt and chat template. Asking
+    // for nearly the whole context as answer tokens made long chats fail inside
+    // llama_decode when the KV slots ran out at the end of the reply.
+    val answerCeiling = minOf(4096, (safeContext * 0.75f).toInt()).coerceAtLeast(16)
+    val safeMaxTokens = maxTokens.coerceIn(16, answerCeiling)
+    return copy(
+      temperature = temperature.coerceIn(0f, 2f),
+      topP = topP.coerceIn(0.05f, 1f),
+      topK = topK.coerceIn(0, 200),
+      maxTokens = safeMaxTokens,
+      repeatPenalty = repeatPenalty.coerceIn(1f, 2f),
+      contextTokens = safeContext,
+      threads = threads.coerceIn(1, 8)
+    )
+  }
 
   companion object {
     // Conservative defaults for a Redmi Note 14 Pro class device (Helio G100-Ultra).
@@ -38,6 +46,7 @@ data class GenerationParams(
     const val DEFAULT_REPEAT_PENALTY = 1.1f
     const val DEFAULT_CONTEXT_TOKENS = 2048
     const val DEFAULT_THREADS = 4
+
 
     const val KEY_TEMPERATURE = "gen_temperature"
     const val KEY_TOP_P = "gen_top_p"

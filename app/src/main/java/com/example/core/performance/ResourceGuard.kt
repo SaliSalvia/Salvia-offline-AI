@@ -52,8 +52,10 @@ data class ResourceSnapshot(
 
 /**
  * Conservative guard for this app's inference jobs.
- * It uses Android's thermal severity, current process PSS and process CPU time. CPU utilization
- * alone never stops inference: sustained CPU use is expected during local model generation.
+ * It uses Android's thermal severity, system-wide RAM pressure and process CPU time. CPU
+ * utilization alone never stops inference: sustained CPU use is expected during generation.
+ * Process PSS is still reported, but mmap-backed model pages are reclaimable and must not be
+ * treated as a hard memory limit.
  */
 class ResourceGuard(
   private val context: Context,
@@ -62,7 +64,6 @@ class ResourceGuard(
   companion object {
     const val THRESHOLD_CAUTION = 70
     const val THRESHOLD_HARD_STOP = 80
-    const val THRESHOLD_RESUME = 70
     private const val MONITOR_INTERVAL_MS = 1_000L
     private const val MIN_FREE_RAM_RESERVE_MB = 1_024
   }
@@ -70,16 +71,19 @@ class ResourceGuard(
   private val appContext = context.applicationContext
   private val actManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
   private val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
-  private val initialSafeAiRamBudgetMb = calculateSafeAiRamBudgetMb()
+  private val initialMemInfo = ActivityManager.MemoryInfo().also { actManager?.getMemoryInfo(it) }
+  private val initialSafeAiRamBudgetMb = calculateSafeAiRamBudgetMb(initialMemInfo)
   private val initialProcessPssMb = readProcessPssMb()
-  private val initialRamUsagePct = if (initialSafeAiRamBudgetMb > 0) {
-    ((initialProcessPssMb.toFloat() / initialSafeAiRamBudgetMb) * 100f).toInt().coerceIn(0, 100)
-  } else {
-    100
+  private val initialAvailableMb = (initialMemInfo.availMem / (1024L * 1024L)).toInt()
+  // Report system RAM pressure, not PSS / budget. PSS includes file-backed mmap pages
+  // that Android can reclaim, so it is a poor reason to hard-stop a large GGUF model.
+  private val initialRamUsagePct = systemRamUsedPct(initialMemInfo)
+  private val initialRamState = when {
+    initialMemInfo.lowMemory || initialSafeAiRamBudgetMb <= 0 ||
+      initialAvailableMb < MIN_FREE_RAM_RESERVE_MB / 2 -> GuardResourceState.HARD_STOP
+    initialAvailableMb < MIN_FREE_RAM_RESERVE_MB -> GuardResourceState.CAUTION
+    else -> GuardResourceState.NORMAL
   }
-  private val initialRamState = if (
-    initialSafeAiRamBudgetMb <= 0 || initialRamUsagePct >= THRESHOLD_HARD_STOP
-  ) GuardResourceState.HARD_STOP else GuardResourceState.NORMAL
 
   private val _snapshot = MutableStateFlow(
     ResourceSnapshot(
@@ -91,7 +95,11 @@ class ResourceGuard(
       batteryTempCelsius = null,
       thermalSystemStatus = "در انتظار دادهٔ سیستم",
       isAiExecutionAllowed = initialRamState != GuardResourceState.HARD_STOP,
-      activeConstraintReason = if (initialRamState == GuardResourceState.HARD_STOP) "سقف امن حافظه هنوز تأیید نشده است" else null,
+      activeConstraintReason = if (initialRamState == GuardResourceState.HARD_STOP) {
+        "حافظهٔ آزاد سیستم برای اجرای ایمن کافی نیست"
+      } else {
+        null
+      },
       safeAiRamBudgetMb = initialSafeAiRamBudgetMb,
       appProcessPssMb = initialProcessPssMb
     )
@@ -127,17 +135,24 @@ class ResourceGuard(
     val memInfo = ActivityManager.MemoryInfo()
     actManager?.getMemoryInfo(memInfo)
 
+    val totalMb = (memInfo.totalMem / (1024L * 1024L)).toInt()
+    val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
     val safeBudgetMb = calculateSafeAiRamBudgetMb(memInfo)
     val processPssMb = readProcessPssMb()
-    val ramBudgetUsedPct = if (safeBudgetMb > 0) {
-      ((processPssMb.toFloat() / safeBudgetMb) * 100f).toInt().coerceIn(0, 100)
+    val systemUsedPct = if (totalMb > 0) {
+      (((totalMb - availableMb).toFloat() / totalMb) * 100f).toInt().coerceIn(0, 100)
     } else {
       100
     }
 
+    // A loaded GGUF is memory-mapped: most of its resident PSS is file-backed and
+    // reclaimable. Hard-stop only on real system pressure (lowMemory / critically
+    // low free RAM), and use system-wide usage for the caution state.
     val ramState = when {
-      memInfo.lowMemory || safeBudgetMb <= 0 || ramBudgetUsedPct >= THRESHOLD_HARD_STOP -> GuardResourceState.HARD_STOP
-      ramBudgetUsedPct >= THRESHOLD_CAUTION -> GuardResourceState.CAUTION
+      memInfo.lowMemory || safeBudgetMb <= 0 || availableMb < MIN_FREE_RAM_RESERVE_MB / 2 ->
+        GuardResourceState.HARD_STOP
+      availableMb < MIN_FREE_RAM_RESERVE_MB || systemUsedPct >= THRESHOLD_HARD_STOP ->
+        GuardResourceState.CAUTION
       else -> GuardResourceState.NORMAL
     }
 
@@ -148,14 +163,14 @@ class ResourceGuard(
     // Do not stop a healthy inference just because its CPU use is high. Stop only for critical
     // Android thermal severity or a real memory pressure / low-memory signal.
     val shouldStop = ramState == GuardResourceState.HARD_STOP || thermal.first == GuardResourceState.HARD_STOP
-    val canResume = ramBudgetUsedPct <= THRESHOLD_RESUME &&
+    val canResume = availableMb >= MIN_FREE_RAM_RESERVE_MB &&
       !memInfo.lowMemory && thermal.first != GuardResourceState.HARD_STOP
 
     var constraintMsg: String? = null
     if (shouldStop && !isHardStopped) {
       isHardStopped = true
       constraintMsg = when {
-        ramState == GuardResourceState.HARD_STOP -> "فشار واقعی حافظهٔ فرایند یا هشدار کمبود حافظهٔ اندروید"
+        ramState == GuardResourceState.HARD_STOP -> "فشار واقعی حافظه یا هشدار کمبود حافظهٔ اندروید"
         else -> "وضعیت حرارتی بحرانی گزارش‌شده توسط اندروید"
       }
       onEmergencyAiStopRequested?.invoke(constraintMsg)
@@ -170,7 +185,7 @@ class ResourceGuard(
     wasInRamCaution = ramState == GuardResourceState.CAUTION
 
     _snapshot.value = ResourceSnapshot(
-      ramUsagePctOfBudget = ramBudgetUsedPct,
+      ramUsagePctOfBudget = systemUsedPct,
       ramState = ramState,
       cpuSustainedPct = cpuPct,
       cpuState = cpuState,
@@ -184,32 +199,55 @@ class ResourceGuard(
     )
   }
 
-  /** Preflight check for model load; estimates weights + KV cache + workspace + safety margin. */
-  fun canSafelyLoadModel(modelWeightsMb: Int, contextTokens: Int): Pair<Boolean, String> {
+  /**
+   * Preflight check for model load. llama.cpp mmaps GGUF weights on Android, so the
+   * multi-gigabyte weight file is file-backed and reclaimable; only KV cache, compute
+   * workspace and the safety margin need guaranteed anonymous memory.
+   */
+  fun canSafelyLoadModel(
+    modelWeightsMb: Int,
+    contextTokens: Int,
+    weightsAreMmap: Boolean = true,
+    loadedModelWeightsMb: Int = 0
+  ): Pair<Boolean, String> {
     if (modelWeightsMb <= 0 || contextTokens <= 0) {
       return false to "مشخصات اندازه یا context مدل معتبر نیست."
     }
 
     val memInfo = ActivityManager.MemoryInfo()
     actManager?.getMemoryInfo(memInfo)
+    val totalMb = (memInfo.totalMem / (1024L * 1024L)).toInt()
     val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
     val safeBudgetMb = calculateSafeAiRamBudgetMb(memInfo)
     val currentPssMb = readProcessPssMb()
 
-    // A conservative generic estimate. Exact KV-cache size must come from model architecture and
-    // the selected runtime; this value is a preflight guard, not a substitute for runtime metrics.
-    val kvCacheEstimateMb = (contextTokens * 0.12f).toInt()
-    val runtimeWorkspaceMb = 300
-    val safetyMarginMb = 700
-    val incrementalRequiredMb = modelWeightsMb + kvCacheEstimateMb + runtimeWorkspaceMb + safetyMarginMb
-    val remainingAppBudgetMb = (safeBudgetMb - currentPssMb).coerceAtLeast(0)
+    // Qwen3-8B-class models use roughly 0.28 MB/token of FP16 KV cache. A generic 0.12
+    // estimate under-counted that by more than 2x and caused late decode failures.
+    val kvCacheEstimateMb = maxOf(64, (contextTokens * 0.28f).toInt())
+    val runtimeWorkspaceMb = if (weightsAreMmap) 384 else 640
+    val safetyMarginMb = 512
+    val anonymousWeightsMb = if (weightsAreMmap) 0 else modelWeightsMb
+    val incrementalRequiredMb = anonymousWeightsMb + kvCacheEstimateMb + runtimeWorkspaceMb + safetyMarginMb
+
+    // When switching models, native loading frees the current one first. Exclude its
+    // mapped pages so the preflight does not reject a replacement that actually fits.
+    val reclaimableMb = loadedModelWeightsMb.coerceIn(0, currentPssMb)
+    val baselinePssMb = (currentPssMb - reclaimableMb).coerceAtLeast(0)
+    val remainingAppBudgetMb = (safeBudgetMb - baselinePssMb).coerceAtLeast(0)
     val remainingPhysicalMb = (availableMb - MIN_FREE_RAM_RESERVE_MB).coerceAtLeast(0)
     val allowedIncrementMb = minOf(remainingAppBudgetMb, remainingPhysicalMb)
 
-    return if (incrementalRequiredMb > allowedIncrementMb || memInfo.lowMemory) {
-      false to "بارگذاری رد شد: برآورد ${incrementalRequiredMb}MB است، اما پس از رزرو ایمنی فقط ${allowedIncrementMb}MB قابل‌استفاده است."
-    } else {
-      true to "پیش‌بررسی حافظه موفق بود؛ مقدار نهایی هنگام بارگذاری باید دوباره کنترل شود."
+    val modelLargerThanUsableRam = modelWeightsMb > (totalMb * 0.85f).toInt()
+
+    return when {
+      memInfo.lowMemory -> false to "بارگذاری رد شد: اندروید هشدار کمبود حافظه (lowMemory) می‌دهد."
+      modelLargerThanUsableRam -> false to
+        "بارگذاری رد شد: حجم فایل مدل (${modelWeightsMb}MB) از سقف امن RAM این دستگاه بیشتر است."
+      incrementalRequiredMb > allowedIncrementMb -> false to
+        "بارگذاری رد شد: برای KV/workspace حدود ${incrementalRequiredMb}MB لازم است، اما پس از رزرو ایمنی فقط ${allowedIncrementMb}MB آزاد است. چند برنامه را ببندید یا context را کم کنید."
+      weightsAreMmap && modelWeightsMb.toFloat() > totalMb * 0.55f -> true to
+        "مدل بزرگ است؛ با mmap بارگذاری می‌شود و ممکن است روی این دستگاه کند یا تحت فشار حافظه باشد."
+      else -> true to ""
     }
   }
 
@@ -218,14 +256,18 @@ class ResourceGuard(
     if (memInfo.totalMem <= 0L) manager.getMemoryInfo(memInfo)
 
     val totalMb = (memInfo.totalMem / (1024L * 1024L)).toInt()
-    val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
-    if (totalMb <= 0 || availableMb <= 0) return 0
+    if (totalMb <= 0) return 0
 
     // Reserve at least 2GB and 30% of RAM for Android, other apps and transient allocations.
     val systemReserveMb = maxOf(2_048, (totalMb * 0.30f).toInt())
-    val totalBudgetMb = (totalMb - systemReserveMb).coerceAtLeast(0)
-    val currentAvailabilityBudgetMb = (availableMb - MIN_FREE_RAM_RESERVE_MB).coerceAtLeast(0)
-    return minOf(totalBudgetMb, currentAvailabilityBudgetMb)
+    return (totalMb - systemReserveMb).coerceAtLeast(0)
+  }
+
+  private fun systemRamUsedPct(memInfo: ActivityManager.MemoryInfo): Int {
+    val totalMb = (memInfo.totalMem / (1024L * 1024L)).toInt()
+    val availableMb = (memInfo.availMem / (1024L * 1024L)).toInt()
+    if (totalMb <= 0) return 100
+    return (((totalMb - availableMb).toFloat() / totalMb) * 100f).toInt().coerceIn(0, 100)
   }
 
   private fun readProcessPssMb(): Int = try {

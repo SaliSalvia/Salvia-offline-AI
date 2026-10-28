@@ -5,9 +5,13 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +25,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -32,6 +37,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -53,7 +60,9 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Stop
@@ -70,6 +79,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -78,6 +88,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,11 +97,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -102,6 +118,9 @@ import com.example.ui.components.ModelManagerDialog
 import com.example.ui.components.ThinkingProcessCard
 import com.example.ui.components.XiaomiTuningDialog
 import com.example.ui.components.ZipViewerDialog
+import com.example.ui.theme.AccentAmber
+import com.example.ui.theme.AccentCyan
+import com.example.ui.theme.AccentPurple
 import com.example.ui.theme.BackgroundPitchBlack
 import com.example.ui.theme.HyperOsOrange
 import com.example.ui.theme.NeonPinkContainer
@@ -122,6 +141,10 @@ import com.example.core.localization.AppLanguage
 import com.example.core.localization.AppStrings
 import com.example.viewmodel.AppScreen
 import com.example.viewmodel.MainViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -139,6 +162,7 @@ fun MainChatScreen(
 
   var inputText by remember { mutableStateOf("") }
   var showAttachMenu by remember { mutableStateOf(false) }
+  var ggufTargetSlot by remember { mutableStateOf("TEXT") }
 
   // File pickers using Storage Access Framework (SAF)
   val filePicker = rememberLauncherForActivityResult(
@@ -151,7 +175,13 @@ fun MainChatScreen(
     contract = ActivityResultContracts.OpenDocument()
   ) { uri: Uri? ->
     uri?.let {
-      viewModel.loadGgufFromUri(it, "imported-model.gguf", "3.8 GB", "TEXT")
+      if (ggufTargetSlot == "IMAGE") {
+        viewModel.rejectImageModelImport()
+      } else {
+        // Same import path as the Models tab: registers the real file name/size,
+        // rejects unsupported formats, and reports loaded only after llama.cpp succeeds.
+        viewModel.attachFileUri(it)
+      }
     }
   }
 
@@ -165,12 +195,43 @@ fun MainChatScreen(
     viewModel.switchScreen(AppScreen.CHAT)
   }
 
-  // Auto-scroll when new messages arrive or when streaming
-  LaunchedEffect(uiState.messages.size, uiState.liveAnswer.length, uiState.liveThinking.length) {
-    if (uiState.currentScreen == AppScreen.CHAT && (uiState.messages.isNotEmpty() || uiState.isStreaming)) {
-      listState.animateScrollToItem(
-        maxOf(0, uiState.messages.size + (if (uiState.isStreaming) 1 else 0) - 1)
-      )
+  // Follow new messages only when the user is already reading the bottom.
+  // This effect no longer depends on token text, so the screen is not invalidated
+  // for every streamed batch while the user scrolls through older answers.
+  val isNearBottom = {
+    val info = listState.layoutInfo
+    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+    info.totalItemsCount == 0 || lastVisible < 0 || lastVisible >= info.totalItemsCount - 2
+  }
+
+  LaunchedEffect(uiState.currentScreen, uiState.messages.size, uiState.isStreaming) {
+    if (uiState.currentScreen == AppScreen.CHAT && (uiState.messages.isNotEmpty() || uiState.isStreaming) && isNearBottom()) {
+      delay(24)
+      val target = listState.layoutInfo.totalItemsCount - 1
+      if (target >= 0) listState.scrollToItem(target)
+    }
+  }
+
+  // Coalesce live-token scrolls into at most one reposition per ~70 ms.
+  LaunchedEffect(uiState.currentScreen) {
+    if (uiState.currentScreen != AppScreen.CHAT) return@LaunchedEffect
+    viewModel.liveStream
+      .map { it.answer.length + it.thinking.length }
+      .distinctUntilChanged()
+      .collectLatest {
+        delay(70)
+        if (isNearBottom()) {
+          val last = listState.layoutInfo.totalItemsCount - 1
+          if (last >= 0) listState.scrollToItem(last)
+        }
+      }
+  }
+
+  val showScrollToBottom by remember {
+    derivedStateOf {
+      val info = listState.layoutInfo
+      val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+      info.totalItemsCount > 0 && lastVisible >= 0 && lastVisible < info.totalItemsCount - 3
     }
   }
 
@@ -234,32 +295,114 @@ fun MainChatScreen(
 
           Spacer(modifier = Modifier.height(16.dp))
 
-          // New Chat Button
+          // New Chat Button — the single high-contrast action in the drawer.
           Surface(
             onClick = {
               viewModel.createNewSession()
               viewModel.switchScreen(AppScreen.CHAT)
               coroutineScope.launch { drawerState.close() }
             },
-            shape = RoundedCornerShape(12.dp),
-            color = NeonPinkContainer,
-            border = androidx.compose.foundation.BorderStroke(1.dp, NeonPinkPrimary.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(14.dp),
+            color = NeonPinkPrimary,
             modifier = Modifier
               .fillMaxWidth()
               .testTag("new_chat_button")
           ) {
             Row(
-              modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+              modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
               verticalAlignment = Alignment.CenterVertically
             ) {
-              Icon(Icons.Default.AddComment, contentDescription = null, tint = NeonPinkPrimary)
+              Icon(Icons.Default.AddComment, contentDescription = null, tint = BackgroundPitchBlack, modifier = Modifier.size(19.dp))
               Spacer(modifier = Modifier.width(10.dp))
-              Text(AppStrings.newChat(uiState.appLanguage), color = TextPrimary, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+              Text(
+                AppStrings.newChat(uiState.appLanguage),
+                color = BackgroundPitchBlack,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Bold
+              )
             }
           }
 
-          Spacer(modifier = Modifier.height(16.dp))
-          Text(AppStrings.recentSessions(uiState.appLanguage), color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+          Spacer(modifier = Modifier.height(10.dp))
+
+          // Secondary controls moved out of the crowded top bar.
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+          ) {
+            Surface(
+              onClick = { viewModel.toggleXiaomiTuning(true) },
+              shape = RoundedCornerShape(11.dp),
+              color = SurfaceCard,
+              border = androidx.compose.foundation.BorderStroke(1.dp, HyperOsOrange.copy(alpha = 0.35f)),
+              modifier = Modifier
+                .weight(1f)
+                .testTag("xiaomi_turbo_pill")
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Box(
+                  modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(
+                      when (uiState.performanceMode) {
+                        PerformanceMode.HYPER_TURBO -> PerformanceBeastRed
+                        PerformanceMode.BALANCED -> TurboActiveGreen
+                        PerformanceMode.ECO_BATTERY -> HyperOsOrange
+                      }
+                    )
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(Icons.Default.Speed, contentDescription = null, tint = HyperOsOrange, modifier = Modifier.size(15.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Turbo", color = HyperOsOrange, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+              }
+            }
+
+            Surface(
+              onClick = { viewModel.toggleLanguage() },
+              shape = RoundedCornerShape(11.dp),
+              color = SurfaceCard,
+              border = androidx.compose.foundation.BorderStroke(1.dp, NeonPinkPrimary.copy(alpha = 0.3f)),
+              modifier = Modifier
+                .weight(1f)
+                .testTag("language_toggle_pill")
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Text(
+                  text = if (uiState.appLanguage == AppLanguage.FA) "🇮🇷" else "🇬🇧",
+                  fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                  text = if (uiState.appLanguage == AppLanguage.FA) "فارسی" else "English",
+                  color = NeonPinkLight,
+                  fontSize = 11.sp,
+                  fontWeight = FontWeight.Bold
+                )
+              }
+            }
+          }
+
+          Spacer(modifier = Modifier.height(18.dp))
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            Text(AppStrings.recentSessions(uiState.appLanguage), color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text(
+              text = "${uiState.sessions.size}",
+              color = TextTertiary,
+              fontSize = 10.5.sp
+            )
+          }
           Spacer(modifier = Modifier.height(8.dp))
 
           // Sessions List
@@ -336,14 +479,31 @@ fun MainChatScreen(
                   fontSize = 10.5.sp
                 )
               }
-              Spacer(modifier = Modifier.height(4.dp))
+              Spacer(modifier = Modifier.height(6.dp))
+
+              val totalRam = uiState.deviceProfile?.totalRamGb?.takeIf { it > 0f }
+              if (totalRam != null) {
+                val usedRam = (totalRam - (uiState.deviceProfile?.availRamGb ?: totalRam)).coerceAtLeast(0f)
+                LinearProgressIndicator(
+                  progress = { (usedRam / totalRam).coerceIn(0f, 1f) },
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp)),
+                  color = if (usedRam / totalRam > 0.85f) PerformanceBeastRed else NeonPinkPrimary,
+                  trackColor = SurfaceObsidianElevated
+                )
+                Spacer(modifier = Modifier.height(5.dp))
+              }
+
               Text(
                 text = uiState.deviceProfile?.let { "RAM آزاد: ${it.availRamGb} GB / ${it.totalRamGb} GB" } ?: "RAM: در حال سنجش",
                 color = TextSecondary,
                 fontSize = 11.sp
               )
+              Spacer(modifier = Modifier.height(2.dp))
               Text(
-                text = "SoC گزارش‌شده: ${uiState.deviceProfile?.socName ?: "نامشخص"}",
+                text = "SoC: ${uiState.deviceProfile?.socName ?: "نامشخص"}",
                 color = NeonPinkPrimary,
                 fontSize = 10.5.sp,
                 fontWeight = FontWeight.SemiBold
@@ -367,110 +527,130 @@ fun MainChatScreen(
             .background(SurfaceObsidian)
             .statusBarsPadding()
         ) {
-          // Top Bar
+          // Top Bar: identity, the active model and one primary action.
           Row(
             modifier = Modifier
               .fillMaxWidth()
-              .padding(horizontal = 10.dp, vertical = 6.dp),
+              .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
           ) {
             IconButton(
               onClick = { coroutineScope.launch { drawerState.open() } },
-              modifier = Modifier.testTag("drawer_menu_button")
+              modifier = Modifier
+                .size(40.dp)
+                .testTag("drawer_menu_button")
             ) {
-              Icon(Icons.Default.Menu, contentDescription = "منو", tint = TextPrimary)
+              Icon(
+                Icons.Default.Menu,
+                contentDescription = "منو",
+                tint = TextSecondary,
+                modifier = Modifier.size(21.dp)
+              )
             }
 
-            // Model Pill
-            Box(
-              modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(SurfaceObsidianElevated)
-                .border(1.dp, NeonPinkPrimary.copy(alpha = 0.4f), RoundedCornerShape(20.dp))
-                .clickable { viewModel.toggleModelManager(true) }
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-                .testTag("model_selector_pill"),
-              contentAlignment = Alignment.Center
-            ) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Box(
+                modifier = Modifier
+                  .size(30.dp)
+                  .clip(RoundedCornerShape(9.dp))
+                  .background(Brush.linearGradient(listOf(NeonPinkPrimary, AccentPurple))),
+                contentAlignment = Alignment.Center
+              ) {
                 Icon(
-                  imageVector = Icons.Default.Memory,
+                  Icons.Default.AutoAwesome,
                   contentDescription = null,
-                  tint = NeonPinkPrimary,
-                  modifier = Modifier.size(15.dp)
+                  tint = BackgroundPitchBlack,
+                  modifier = Modifier.size(17.dp)
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                val activeModelLabel = uiState.textSlotModel.modelName.take(18)
+              }
+              Spacer(modifier = Modifier.width(7.dp))
+              Column {
                 Text(
-                  text = activeModelLabel,
+                  text = "Sali-Localo",
                   color = TextPrimary,
-                  fontSize = 12.5.sp,
+                  fontSize = 14.sp,
+                  fontWeight = FontWeight.Bold,
+                  letterSpacing = 0.2.sp
+                )
+                Text(
+                  text = if (uiState.appLanguage == AppLanguage.FA) "هوش مصنوعی آفلاین" else "Offline AI",
+                  color = TextTertiary,
+                  fontSize = 9.5.sp
+                )
+              }
+            }
+
+            // Active model selector (fills remaining width, never overflows).
+            Row(
+              modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(SurfaceObsidianElevated)
+                .border(
+                  1.dp,
+                  if (uiState.textSlotModel.isLoaded) NeonPinkPrimary.copy(alpha = 0.35f) else SurfaceCardBorder,
+                  RoundedCornerShape(14.dp)
+                )
+                .clickable { viewModel.toggleModelManager(true) }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .testTag("model_selector_pill"),
+              verticalAlignment = Alignment.CenterVertically
+            ) {
+              Box(
+                modifier = Modifier
+                  .size(7.dp)
+                  .clip(CircleShape)
+                  .background(if (uiState.textSlotModel.isLoaded) TurboActiveGreen else AccentAmber)
+              )
+              Spacer(modifier = Modifier.width(7.dp))
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text = uiState.textSlotModel.modelName.take(20),
+                  color = TextPrimary,
+                  fontSize = 11.5.sp,
                   fontWeight = FontWeight.SemiBold,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                  text = if (uiState.textSlotModel.isLoaded) {
+                    "${uiState.textSlotModel.quantization} • ${uiState.textSlotModel.contextLength} ctx"
+                  } else {
+                    "برای شروع لمس کنید"
+                  },
+                  color = if (uiState.textSlotModel.isLoaded) NeonPinkLight else TextTertiary,
+                  fontSize = 9.5.sp,
                   maxLines = 1
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                  text = "[Q4_K_M]",
-                  color = NeonPinkLight,
-                  fontSize = 10.5.sp
-                )
               }
+              Icon(
+                Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                tint = TextTertiary,
+                modifier = Modifier.size(16.dp)
+              )
             }
 
-            // Xiaomi Turbo Pill
-            Box(
+            // One-tap new conversation keeps the top bar calm.
+            IconButton(
+              onClick = {
+                viewModel.createNewSession()
+                viewModel.switchScreen(AppScreen.CHAT)
+              },
               modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(SurfaceObsidianElevated)
-                .border(1.dp, HyperOsOrange.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-                .clickable { viewModel.toggleXiaomiTuning(true) }
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-                .testTag("xiaomi_turbo_pill"),
-              contentAlignment = Alignment.Center
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(NeonPinkContainer)
+                .border(1.dp, NeonPinkPrimary.copy(alpha = 0.35f), CircleShape)
+                .testTag("top_new_chat_button")
             ) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                  modifier = Modifier
-                    .size(8.dp)
-                    .clip(CircleShape)
-                    .background(
-                      when (uiState.performanceMode) {
-                        PerformanceMode.HYPER_TURBO -> PerformanceBeastRed
-                        PerformanceMode.BALANCED -> TurboActiveGreen
-                        PerformanceMode.ECO_BATTERY -> HyperOsOrange
-                      }
-                    )
-                )
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                  text = "Turbo 🚀",
-                  color = HyperOsOrange,
-                  fontSize = 11.5.sp,
-                  fontWeight = FontWeight.Bold
-                )
-              }
-            }
-
-            // Language Switcher Pill (Bilingual FA / EN)
-            Box(
-              modifier = Modifier
-                .clip(RoundedCornerShape(20.dp))
-                .background(SurfaceObsidianElevated)
-                .border(1.dp, NeonPinkPrimary.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-                .clickable { viewModel.toggleLanguage() }
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-                .testTag("language_toggle_pill"),
-              contentAlignment = Alignment.Center
-            ) {
-              Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                  text = if (uiState.appLanguage == AppLanguage.FA) "🇮🇷 فارسی" else "🇬🇧 English",
-                  color = NeonPinkLight,
-                  fontSize = 11.sp,
-                  fontWeight = FontWeight.Bold
-                )
-              }
+              Icon(
+                Icons.Default.AddComment,
+                contentDescription = "گفت‌وگوی جدید",
+                tint = NeonPinkPrimary,
+                modifier = Modifier.size(19.dp)
+              )
             }
           }
 
@@ -494,25 +674,53 @@ fun MainChatScreen(
 
             tabs.forEach { (screen, label) ->
               val isSelected = uiState.currentScreen == screen
-              Box(
+              val background by animateColorAsState(
+                targetValue = if (isSelected) NeonPinkContainer else Color.Transparent,
+                animationSpec = tween(180),
+                label = "tabBackground"
+              )
+              val foreground by animateColorAsState(
+                targetValue = if (isSelected) NeonPinkLight else TextSecondary,
+                animationSpec = tween(180),
+                label = "tabForeground"
+              )
+              Row(
                 modifier = Modifier
                   .clip(RoundedCornerShape(12.dp))
-                  .background(if (isSelected) NeonPinkContainer else SurfaceCard)
-                  .border(1.dp, if (isSelected) NeonPinkPrimary else SurfaceCardBorder, RoundedCornerShape(12.dp))
+                  .background(background)
+                  .border(
+                    1.dp,
+                    if (isSelected) NeonPinkPrimary.copy(alpha = 0.8f) else SurfaceCardBorder,
+                    RoundedCornerShape(12.dp)
+                  )
                   .clickable { viewModel.switchScreen(screen) }
-                  .padding(horizontal = 12.dp, vertical = 5.dp)
+                  .padding(horizontal = 10.dp, vertical = 6.dp)
                   .testTag("nav_${screen.name.lowercase()}"),
-                contentAlignment = Alignment.Center
+                verticalAlignment = Alignment.CenterVertically
               ) {
+                Icon(
+                  imageVector = screenIcon(screen),
+                  contentDescription = null,
+                  tint = foreground,
+                  modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
                 Text(
                   text = label,
-                  color = if (isSelected) NeonPinkLight else TextSecondary,
-                  fontSize = 11.5.sp,
+                  color = foreground,
+                  fontSize = 11.sp,
                   fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                 )
               }
             }
           }
+
+          Box(
+            modifier = Modifier
+              .fillMaxWidth()
+              .height(1.dp)
+              .background(SurfaceCardBorder.copy(alpha = 0.55f))
+          )
         }
       },
       bottomBar = {
@@ -641,6 +849,7 @@ fun MainChatScreen(
                     leadingIcon = { Icon(Icons.Default.Memory, contentDescription = null, tint = TextPink) },
                     onClick = {
                       showAttachMenu = false
+                      ggufTargetSlot = "TEXT"
                       ggufPicker.launch(arrayOf("*/*"))
                     }
                   )
@@ -649,38 +858,54 @@ fun MainChatScreen(
 
               Spacer(modifier = Modifier.width(8.dp))
 
-              // Main Text Field
-              OutlinedTextField(
-                value = inputText,
-                onValueChange = { inputText = it },
-                placeholder = {
+              // Modern, low-overhead composer: one border, one text field, no
+              // Material decoration layers recomposing on every keystroke.
+              val inputBorder by animateColorAsState(
+                targetValue = if (inputText.isNotBlank()) NeonPinkPrimary.copy(alpha = 0.65f) else SurfaceCardBorder,
+                animationSpec = tween(180),
+                label = "inputBorder"
+              )
+
+              Box(
+                modifier = Modifier
+                  .weight(1f)
+                  .clip(RoundedCornerShape(24.dp))
+                  .background(SurfaceObsidianElevated)
+                  .border(1.dp, inputBorder, RoundedCornerShape(24.dp))
+                  .padding(horizontal = 14.dp, vertical = 11.dp),
+                contentAlignment = Alignment.CenterStart
+              ) {
+                if (inputText.isEmpty()) {
                   Text(
                     text = AppStrings.inputPlaceholder(uiState.appLanguage),
                     color = TextTertiary,
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                   )
-                },
-                modifier = Modifier
-                  .weight(1f)
-                  .testTag("chat_input_field"),
-                shape = RoundedCornerShape(22.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                  focusedContainerColor = SurfaceObsidianElevated,
-                  unfocusedContainerColor = SurfaceObsidianElevated,
-                  focusedBorderColor = NeonPinkPrimary,
-                  unfocusedBorderColor = SurfaceCardBorder,
-                  focusedTextColor = TextPrimary,
-                  unfocusedTextColor = TextPrimary
-                ),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = {
-                  if (inputText.isNotEmpty() || uiState.attachedFiles.isNotEmpty()) {
-                    viewModel.sendMessage(inputText)
-                    inputText = ""
-                  }
-                }),
-                maxLines = 4
-              )
+                }
+                BasicTextField(
+                  value = inputText,
+                  onValueChange = { inputText = it },
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("chat_input_field"),
+                  textStyle = TextStyle(
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp
+                  ),
+                  cursorBrush = SolidColor(NeonPinkPrimary),
+                  keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                  keyboardActions = KeyboardActions(onSend = {
+                    if (inputText.isNotEmpty() || uiState.attachedFiles.isNotEmpty()) {
+                      viewModel.sendMessage(inputText)
+                      inputText = ""
+                    }
+                  }),
+                  maxLines = 5
+                )
+              }
 
               Spacer(modifier = Modifier.width(8.dp))
 
@@ -734,10 +959,19 @@ fun MainChatScreen(
         modifier = Modifier
           .fillMaxSize()
           .padding(innerPadding)
-          .background(BackgroundPitchBlack)
+          .background(
+            Brush.verticalGradient(
+              listOf(Color(0xFF0D0A13), BackgroundPitchBlack, Color(0xFF07070B))
+            )
+          )
       ) {
-        // Route according to selected Hub Screen!
-        when (uiState.currentScreen) {
+        // Cross-fade between hubs instead of an abrupt screen swap.
+        AnimatedContent(
+          targetState = uiState.currentScreen,
+          transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
+          label = "hubScreen"
+        ) { screen ->
+        when (screen) {
           AppScreen.MODELS -> ModelsHubScreen(viewModel = viewModel)
           AppScreen.FILES -> FilesRagScreen(viewModel = viewModel)
           AppScreen.IMAGE -> ImageHubScreen(viewModel = viewModel)
@@ -750,51 +984,132 @@ fun MainChatScreen(
               Column(
                 modifier = Modifier
                   .fillMaxSize()
-                  .padding(20.dp),
+                  .verticalScroll(rememberScrollState())
+                  .padding(horizontal = 18.dp, vertical = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                verticalArrangement = Arrangement.Top
               ) {
                 Box(
                   modifier = Modifier
-                    .size(72.dp)
+                    .size(84.dp)
                     .clip(CircleShape)
-                    .background(NeonPinkContainer)
-                    .border(2.dp, NeonPinkPrimary, CircleShape),
+                    .background(
+                      Brush.radialGradient(
+                        colors = listOf(NeonPinkPrimary.copy(alpha = 0.32f), Color.Transparent)
+                      )
+                    ),
                   contentAlignment = Alignment.Center
                 ) {
-                  Icon(
-                    imageVector = Icons.Default.AutoAwesome,
-                    contentDescription = null,
-                    tint = NeonPinkPrimary,
-                    modifier = Modifier.size(38.dp)
-                  )
+                  Box(
+                    modifier = Modifier
+                      .size(62.dp)
+                      .clip(CircleShape)
+                      .background(Brush.linearGradient(listOf(NeonPinkPrimary, AccentPurple)))
+                      .border(1.dp, NeonPinkLight.copy(alpha = 0.6f), CircleShape),
+                    contentAlignment = Alignment.Center
+                  ) {
+                    Icon(
+                      imageVector = Icons.Default.AutoAwesome,
+                      contentDescription = null,
+                      tint = BackgroundPitchBlack,
+                      modifier = Modifier.size(30.dp)
+                    )
+                  }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
                   text = AppStrings.appTitle(uiState.appLanguage),
                   color = TextPrimary,
-                  fontSize = 19.sp,
-                  fontWeight = FontWeight.Bold
+                  fontSize = 23.sp,
+                  fontWeight = FontWeight.Bold,
+                  letterSpacing = 0.3.sp
                 )
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                   text = AppStrings.appSubtitle(uiState.appLanguage),
                   color = TextSecondary,
-                  fontSize = 12.sp
+                  fontSize = 12.sp,
+                  textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Honest model readiness card — tapping it opens the model hub.
+                Surface(
+                  onClick = { viewModel.switchScreen(AppScreen.MODELS) },
+                  shape = RoundedCornerShape(14.dp),
+                  color = if (uiState.textSlotModel.isLoaded) SurfaceCard else NeonPinkContainer,
+                  border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (uiState.textSlotModel.isLoaded) SurfaceCardBorder else NeonPinkPrimary.copy(alpha = 0.5f)
+                  )
+                ) {
+                  Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                  ) {
+                    Box(
+                      modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (uiState.textSlotModel.isLoaded) TurboActiveGreen else AccentAmber)
+                    )
+                    Spacer(modifier = Modifier.width(7.dp))
+                    Text(
+                      text = if (uiState.textSlotModel.isLoaded) {
+                        "آماده: ${uiState.textSlotModel.modelName.take(24)}"
+                      } else {
+                        "مدلی بارگذاری نشده — انتخاب مدل GGUF"
+                      },
+                      color = if (uiState.textSlotModel.isLoaded) TextSecondary else NeonPinkLight,
+                      fontSize = 11.5.sp,
+                      fontWeight = FontWeight.Medium,
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                      Icons.AutoMirrored.Filled.ArrowForward,
+                      contentDescription = null,
+                      tint = TextTertiary,
+                      modifier = Modifier.size(14.dp)
+                    )
+                  }
+                }
+
+                Spacer(modifier = Modifier.height(22.dp))
+
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+                ) {
+                  Text(
+                    text = if (uiState.appLanguage == AppLanguage.FA) "شروع سریع" else "Quick start",
+                    color = TextPrimary,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Bold
+                  )
+                  Text(
+                    text = if (uiState.appLanguage == AppLanguage.FA) "آفلاین • خصوصی" else "Offline • Private",
+                    color = TextTertiary,
+                    fontSize = 10.sp
+                  )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 val quickActions = if (uiState.appLanguage == AppLanguage.FA) listOf(
-                  Triple("📦 تحلیل فایل ZIP با Local RAG", "پارس و کاوش سورس‌کدها در حافظه موقت بدون اینترنت", "این فایل زیپ رو بررسی و خلاصه کن"),
-                  Triple("🎨 تصویرساز آفلاین MNN Diffusion", "تولید تصاویر نئونی سایبرپانک بدون سرور", "تصویر یک هوش مصنوعی سایبرپانک مشکی صورتی"),
-                  Triple("⚡ استعلام سخت‌افزار Note 14 Pro", "مشاهده وضعیت فرکانس و تله‌متری چیپست", "مشخصات بهینه‌سازی سخت‌افزاری این دستگاه چیست؟"),
-                  Triple("🎙️ سنتز گفتار و تبدیل صوت Whisper", "تولید گفتار با Kokoro-TTS و رونویسی صوتی", "این متن را به صورت گفتاری برایم بخوان")
+                  ChatSuggestion("گفت‌وگو با مدل محلی", "پرسش و پاسخ کاملاً آفلاین روی همین گوشی", "سلام! خودت را معرفی کن و بگو چه کارهایی می‌توانی آفلاین انجام دهی.", Icons.Default.Chat, NeonPinkPrimary),
+                  ChatSuggestion("تحلیل فایل و سورس‌کد", "ZIP، متن و PDF با بازیابی محلی RAG", "این فایل را بررسی و خلاصه کن", Icons.Default.FolderZip, AccentCyan),
+                  ChatSuggestion("انتخاب مدل مناسب گوشی", "مدل‌های سبک و سریع GGUF", "", Icons.Default.Memory, AccentPurple, opensModels = true),
+                  ChatSuggestion("وضعیت سخت‌افزار", "RAM، دما و تنظیمات Turbo", "مشخصات و وضعیت بهینه‌سازی سخت‌افزاری این دستگاه چیست؟", Icons.Default.Speed, HyperOsOrange)
                 ) else listOf(
-                  Triple("📦 Local RAG ZIP Inspection", "Inspect and search code archives in-memory offline", "Please inspect and summarize this ZIP archive"),
-                  Triple("🎨 Offline Neural Image Studio", "Generate cyberpunk neon artwork with zero cloud dependency", "Draw a glowing cyberpunk AI chip in black and pink"),
-                  Triple("⚡ Note 14 Pro Hardware Telemetry", "Inspect CPU governor, memory budget & thermal state", "What are the hardware optimization specs of this device?"),
-                  Triple("🎙️ Whisper STT & Kokoro TTS", "Voice synthesis and on-device transcription", "Please read this response aloud for me")
+                  ChatSuggestion("Chat with a local model", "Private answers running entirely on this phone", "Hello! Introduce yourself and tell me what you can do offline.", Icons.Default.Chat, NeonPinkPrimary),
+                  ChatSuggestion("Analyse files and code", "ZIP, text and PDF with local RAG", "Please inspect and summarize this file", Icons.Default.FolderZip, AccentCyan),
+                  ChatSuggestion("Choose the right model", "Fast, lightweight GGUF models", "", Icons.Default.Memory, AccentPurple, opensModels = true),
+                  ChatSuggestion("Hardware status", "RAM, thermals and Turbo tuning", "What are the hardware optimization specs of this device?", Icons.Default.Speed, HyperOsOrange)
                 )
 
                 Column(
@@ -803,39 +1118,91 @@ fun MainChatScreen(
                 ) {
                   quickActions.forEach { item ->
                     Surface(
-                      onClick = { inputText = item.third },
-                      shape = RoundedCornerShape(12.dp),
+                      onClick = {
+                        if (item.opensModels) {
+                          viewModel.switchScreen(AppScreen.MODELS)
+                        } else {
+                          inputText = item.prompt
+                        }
+                      },
+                      shape = RoundedCornerShape(14.dp),
                       color = SurfaceCard,
                       border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceCardBorder),
                       modifier = Modifier.fillMaxWidth()
                     ) {
                       Row(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically
                       ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                          Text(item.first, color = NeonPinkLight, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold)
-                          Text(item.second, color = TextSecondary, fontSize = 11.sp)
+                        Box(
+                          modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(item.accent.copy(alpha = 0.12f)),
+                          contentAlignment = Alignment.Center
+                        ) {
+                          Icon(
+                            imageVector = item.icon,
+                            contentDescription = null,
+                            tint = item.accent,
+                            modifier = Modifier.size(19.dp)
+                          )
                         }
+                        Spacer(modifier = Modifier.width(11.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                          Text(item.title, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                          Spacer(modifier = Modifier.height(1.dp))
+                          Text(
+                            text = item.subtitle,
+                            color = TextSecondary,
+                            fontSize = 10.5.sp,
+                            lineHeight = 15.sp,
+                            maxLines = 2
+                          )
+                        }
+                        Icon(
+                          Icons.AutoMirrored.Filled.ArrowForward,
+                          contentDescription = null,
+                          tint = TextTertiary,
+                          modifier = Modifier.size(15.dp)
+                        )
                       }
                     }
                   }
                 }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                Text(
+                  text = if (uiState.appLanguage == AppLanguage.FA) {
+                    "همهٔ مدل‌ها روی همین دستگاه اجرا می‌شوند؛ هیچ داده‌ای به اینترنت ارسال نمی‌شود."
+                  } else {
+                    "Every model runs on this device; no data leaves your phone."
+                  },
+                  color = TextTertiary,
+                  fontSize = 10.sp,
+                  lineHeight = 15.sp,
+                  textAlign = TextAlign.Center
+                )
               }
             } else {
               LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 10.dp, bottom = 64.dp)
               ) {
-                items(uiState.messages, key = { it.id }) { msg ->
+                items(
+                  items = uiState.messages,
+                  key = { it.id },
+                  contentType = { "message" }
+                ) { msg ->
                   MessageBubble(
                     message = msg,
                     currentLanguage = uiState.appLanguage,
                     onInspectZip = { zipName ->
                       val found = uiState.attachedFiles.find { it.fileName == zipName }
                       if (found != null) viewModel.inspectZipDetail(found)
-                    }
+                    },
+                    modifier = Modifier.animateItem()
                   )
                 }
 
@@ -869,53 +1236,38 @@ fun MainChatScreen(
                 }
 
                 if (uiState.isStreaming) {
-                  item {
-                    Column(
-                      modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                      Row(verticalAlignment = Alignment.Top) {
-                        Box(
-                          modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceObsidianElevated)
-                            .border(1.dp, NeonPinkPrimary, CircleShape),
-                          contentAlignment = Alignment.Center
-                        ) {
-                          Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = NeonPinkPrimary, modifier = Modifier.size(17.dp))
-                        }
-
-                        Spacer(modifier = Modifier.width(10.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                          if (uiState.liveThinking.isNotEmpty()) {
-                            ThinkingProcessCard(
-                              thinkingText = uiState.liveThinking,
-                              isStreaming = uiState.liveAnswer.isEmpty(),
-                              durationMs = uiState.liveThinkingDurationMs,
-                              tokensPerSec = uiState.liveTokensPerSecond,
-                              modifier = Modifier.padding(bottom = 8.dp)
-                            )
-                          }
-
-                          if (uiState.liveAnswer.isNotEmpty()) {
-                            com.example.ui.components.MarkdownContent(rawText = uiState.liveAnswer)
-                          } else if (uiState.liveThinking.isEmpty()) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                              CircularProgressIndicator(modifier = Modifier.size(15.dp), color = NeonPinkPrimary, strokeWidth = 2.dp)
-                              Spacer(modifier = Modifier.width(8.dp))
-                              Text(text = "در حال بارگذاری کانتکست و زمان‌بندی هسته‌های ARM64...", color = TextSecondary, fontSize = 11.5.sp)
-                            }
-                          }
-                        }
-                      }
-                    }
+                  item(key = "live_generation", contentType = "live") {
+                    LiveGenerationItem(viewModel = viewModel)
                   }
                 }
               }
             }
+          }
+        }
+        }
+
+        AnimatedVisibility(
+          visible = showScrollToBottom &&
+            uiState.currentScreen == AppScreen.CHAT &&
+            uiState.messages.isNotEmpty(),
+          modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .padding(end = 16.dp, bottom = 12.dp),
+          enter = fadeIn(),
+          exit = fadeOut()
+        ) {
+          SmallFloatingActionButton(
+            onClick = {
+              coroutineScope.launch {
+                val last = listState.layoutInfo.totalItemsCount - 1
+                if (last >= 0) listState.animateScrollToItem(last)
+              }
+            },
+            containerColor = NeonPinkPrimary,
+            contentColor = BackgroundPitchBlack,
+            modifier = Modifier.testTag("scroll_to_bottom_button")
+          ) {
+            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "رفتن به آخرین پیام")
           }
         }
       }
@@ -929,6 +1281,7 @@ fun MainChatScreen(
       imageSlot = uiState.imageSlotModel,
       onDismiss = { viewModel.toggleModelManager(false) },
       onPickGgufFile = { targetSlot ->
+        ggufTargetSlot = targetSlot
         viewModel.toggleModelManager(false)
         ggufPicker.launch(arrayOf("*/*"))
       },
@@ -960,4 +1313,93 @@ fun MainChatScreen(
       onDismiss = { viewModel.inspectZipDetail(null) }
     )
   }
+}
+
+private data class ChatSuggestion(
+  val title: String,
+  val subtitle: String,
+  val prompt: String,
+  val icon: ImageVector,
+  val accent: Color,
+  val opensModels: Boolean = false
+)
+
+/**
+ * Isolated streaming composable. Only this subtree observes [MainViewModel.liveStream],
+ * so token batches never recompose the app bar, drawer, tabs, composer or history.
+ */
+@Composable
+private fun LiveGenerationItem(viewModel: MainViewModel) {
+  val live by viewModel.liveStream.collectAsState()
+
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .padding(horizontal = 14.dp, vertical = 6.dp)
+  ) {
+    Row(verticalAlignment = Alignment.Top) {
+      Box(
+        modifier = Modifier
+          .size(32.dp)
+          .clip(CircleShape)
+          .background(SurfaceObsidianElevated)
+          .border(1.dp, NeonPinkPrimary.copy(alpha = 0.7f), CircleShape),
+        contentAlignment = Alignment.Center
+      ) {
+        Icon(
+          Icons.Default.AutoAwesome,
+          contentDescription = null,
+          tint = NeonPinkPrimary,
+          modifier = Modifier.size(17.dp)
+        )
+      }
+
+      Spacer(modifier = Modifier.width(10.dp))
+
+      Column(modifier = Modifier.weight(1f)) {
+        if (live.thinking.isNotEmpty()) {
+          ThinkingProcessCard(
+            thinkingText = live.thinking,
+            isStreaming = live.answer.isEmpty(),
+            durationMs = live.thinkingDurationMs,
+            tokensPerSec = live.tokensPerSecond,
+            modifier = Modifier.padding(bottom = 8.dp)
+          )
+        }
+
+        if (live.answer.isNotEmpty()) {
+          // The caret is painted inside the last paragraph, so the live answer no
+          // longer jumps by one line every time a streamed block is completed.
+          com.example.ui.components.MarkdownContent(
+            rawText = live.answer,
+            trailingCaret = true
+          )
+        } else if (live.thinking.isEmpty()) {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(
+              modifier = Modifier.size(15.dp),
+              color = NeonPinkPrimary,
+              strokeWidth = 2.dp
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+              text = "در حال آماده‌سازی مدل و context...",
+              color = TextSecondary,
+              fontSize = 11.5.sp
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+private fun screenIcon(screen: AppScreen): ImageVector = when (screen) {
+  AppScreen.CHAT -> Icons.Default.Chat
+  AppScreen.MODELS -> Icons.Default.Memory
+  AppScreen.FILES -> Icons.Default.Folder
+  AppScreen.IMAGE -> Icons.Default.Image
+  AppScreen.VOICE -> Icons.Default.Mic
+  AppScreen.PERFORMANCE -> Icons.Default.Speed
+  AppScreen.SETTINGS -> Icons.Default.Settings
 }

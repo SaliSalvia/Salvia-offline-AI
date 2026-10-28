@@ -11,7 +11,7 @@ object AppStrings {
   fun tabSettings(lang: AppLanguage) = if (lang == AppLanguage.FA) "⚙️ تنظیمات" else "⚙️ Settings"
 
   // App Title & Tagline
-  fun appTitle(lang: AppLanguage) = "DeepGGUF"
+  fun appTitle(lang: AppLanguage) = "Sali-Localo"
   fun appSubtitle(lang: AppLanguage) = if (lang == AppLanguage.FA)
     "مدیریت مدل‌های روی دستگاه • پروفایل منابع بر اساس سخت‌افزار شناسایی‌شده"
   else

@@ -3,6 +3,8 @@ package com.example.gguf
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import java.io.EOFException
+import java.io.IOException
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -25,6 +27,13 @@ object GgufParser {
   private const val GGUF_TYPE_UINT64 = 10
   private const val GGUF_TYPE_INT64 = 11
   private const val GGUF_TYPE_FLOAT64 = 12
+
+  // A real tokenizer array contains ~150k strings. Reading only its first 500
+  // elements (the old behaviour) left the stream misaligned, so every following
+  // metadata key was garbage. Skip arrays completely instead.
+  private const val MAX_ARRAY_ELEMENTS = 10_000_000L
+  private const val MAX_ARRAY_DEPTH = 4
+  private const val MAX_SKIPPED_STRING_BYTES = 16L * 1024L * 1024L
 
   fun parseFromUri(context: Context, uri: Uri, fallbackSizeFormatted: String): GgufMetadata {
     return try {
@@ -81,8 +90,12 @@ object GgufParser {
       var blockCount = 28
       var headCount = 16
       var fileType = 12 // Default to Q4_K_M
+      var fileTypeSeen = false
+      var contextSeen = false
 
-      // Parse metadata keys (limit to first 120 keys to avoid excessive stream reads)
+      // Parse metadata keys (limit to first 120 keys to avoid excessive stream reads).
+      // Stop as soon as the fields this app actually displays are known: the tokenizer
+      // arrays can be hundreds of megabytes, and skipping them is wasted import time.
       val maxKeysToRead = minOf(kvCount, 120L)
       for (i in 0 until maxKeysToRead) {
         val key = readGgufString(stream) ?: break
@@ -95,13 +108,21 @@ object GgufParser {
           when {
             key == "general.architecture" -> arch = valueStr
             key == "general.name" -> modelName = valueStr
-            key.endsWith(".context_length") -> contextLen = valueStr.toIntOrNull() ?: contextLen
+            key.endsWith(".context_length") -> {
+              contextLen = valueStr.toIntOrNull() ?: contextLen
+              contextSeen = true
+            }
             key.endsWith(".embedding_length") -> embLen = valueStr.toIntOrNull() ?: embLen
             key.endsWith(".block_count") -> blockCount = valueStr.toIntOrNull() ?: blockCount
             key.endsWith(".attention.head_count") -> headCount = valueStr.toIntOrNull() ?: headCount
-            key == "general.file_type" -> fileType = valueStr.toIntOrNull() ?: fileType
+            key == "general.file_type" -> {
+              fileType = valueStr.toIntOrNull() ?: fileType
+              fileTypeSeen = true
+            }
           }
         }
+
+        if (arch != "unknown" && fileTypeSeen && contextSeen) break
       }
 
       val quantName = mapGgufFileTypeToQuant(fileType)
@@ -134,7 +155,8 @@ object GgufParser {
     val lenBytes = readExactBytes(stream, 8)
     val lenBuf = ByteBuffer.wrap(lenBytes).order(ByteOrder.LITTLE_ENDIAN)
     val length = lenBuf.long
-    if (length <= 0 || length > 1024 * 1024) return null
+    if (length < 0 || length > 1024 * 1024) return null
+    if (length == 0L) return ""
     val strBytes = readExactBytes(stream, length.toInt())
     return String(strBytes, Charsets.UTF_8)
   }
@@ -182,8 +204,7 @@ object GgufParser {
         val elemType = elemTypeBuf.int
         val countBuf = ByteBuffer.wrap(readExactBytes(stream, 8)).order(ByteOrder.LITTLE_ENDIAN)
         val count = countBuf.long
-        // Skip elements or sample first few
-        skipArrayElements(stream, elemType, count)
+        skipArrayElements(stream, elemType, count, 0)
         "Array[$count elements]"
       }
       else -> {
@@ -192,16 +213,72 @@ object GgufParser {
     }
   }
 
-  private fun skipArrayElements(stream: InputStream, elemType: Int, count: Long) {
-    val safeCount = minOf(count, 500L)
-    for (i in 0 until safeCount) {
-      readGgufValueAsString(stream, elemType)
+  private fun skipArrayElements(
+    stream: InputStream,
+    elemType: Int,
+    count: Long,
+    depth: Int
+  ) {
+    if (count < 0 || count > MAX_ARRAY_ELEMENTS) {
+      throw IOException("Unreasonable GGUF array length: $count")
+    }
+    if (depth > MAX_ARRAY_DEPTH) {
+      throw IOException("GGUF metadata array nesting is too deep")
+    }
+
+    when (elemType) {
+      GGUF_TYPE_UINT8, GGUF_TYPE_INT8, GGUF_TYPE_BOOL -> skipFully(stream, count)
+      GGUF_TYPE_UINT16, GGUF_TYPE_INT16 -> skipFully(stream, count * 2L)
+      GGUF_TYPE_UINT32, GGUF_TYPE_INT32, GGUF_TYPE_FLOAT32 -> skipFully(stream, count * 4L)
+      GGUF_TYPE_UINT64, GGUF_TYPE_INT64, GGUF_TYPE_FLOAT64 -> skipFully(stream, count * 8L)
+      GGUF_TYPE_STRING -> {
+        var remaining = count
+        while (remaining > 0) {
+          val length = readUInt64(stream)
+          if (length < 0 || length > MAX_SKIPPED_STRING_BYTES) {
+            throw IOException("Unreasonable GGUF string length: $length")
+          }
+          skipFully(stream, length)
+          remaining--
+        }
+      }
+      GGUF_TYPE_ARRAY -> {
+        var remaining = count
+        while (remaining > 0) {
+          val nestedType = ByteBuffer.wrap(readExactBytes(stream, 4))
+            .order(ByteOrder.LITTLE_ENDIAN).int
+          val nestedCount = readUInt64(stream)
+          skipArrayElements(stream, nestedType, nestedCount, depth + 1)
+          remaining--
+        }
+      }
+      else -> throw IOException("Unknown GGUF array element type: $elemType")
+    }
+  }
+
+  private fun readUInt64(stream: InputStream): Long =
+    ByteBuffer.wrap(readExactBytes(stream, 8)).order(ByteOrder.LITTLE_ENDIAN).long
+
+  private fun skipFully(stream: InputStream, count: Long) {
+    var remaining = count
+    val buffer = ByteArray(8 * 1024)
+    while (remaining > 0) {
+      val skipped = stream.skip(remaining)
+      if (skipped > 0) {
+        remaining -= skipped
+        continue
+      }
+      val read = stream.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+      if (read < 0) throw EOFException("Unexpected end of GGUF metadata")
+      remaining -= read
     }
   }
 
   private fun readExactBytes(stream: InputStream, count: Int): ByteArray {
     val bytes = ByteArray(count)
-    readFully(stream, bytes)
+    if (readFully(stream, bytes) != count) {
+      throw EOFException("Unexpected end of GGUF file")
+    }
     return bytes
   }
 

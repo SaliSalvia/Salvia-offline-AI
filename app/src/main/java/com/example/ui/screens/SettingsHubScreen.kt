@@ -475,7 +475,7 @@ fun SettingsHubScreen(
         .padding(12.dp)
     ) {
       Column {
-        Text(text = "DeepGGUF • مدیریت مدل‌های محلی", color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+        Text(text = "Sali-Localo • مدیریت مدل‌های محلی", color = TextPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
         Text(text = "پروفایل سخت‌افزار از اطلاعاتی ساخته می‌شود که Android واقعاً گزارش می‌کند.", color = TextSecondary, fontSize = 11.sp)
         Text(text = "پشتیبانی از inference به runtime و فایل مدل معتبر نصب‌شده وابسته است.", color = TextTertiary, fontSize = 10.5.sp)
       }

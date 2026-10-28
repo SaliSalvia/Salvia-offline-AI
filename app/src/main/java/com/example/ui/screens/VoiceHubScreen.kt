@@ -69,7 +69,7 @@ fun VoiceHubScreen(
   modifier: Modifier = Modifier
 ) {
   val uiState by viewModel.uiState.collectAsState()
-  var ttsInputText by remember { mutableStateOf("درود! موتور هوش مصنوعی صوتی آفلاین DeepGGUF آماده تبدیل متن شما به گفتار طبیعی بدون نیاز به اینترنت است.") }
+  var ttsInputText by remember { mutableStateOf("درود! موتور هوش مصنوعی صوتی آفلاین Sali-Localo آماده تبدیل متن شما به گفتار طبیعی بدون نیاز به اینترنت است.") }
 
   val whisperModelPicker = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.OpenDocument()
@@ -96,19 +96,22 @@ fun VoiceHubScreen(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Column {
+      Column(modifier = Modifier.weight(1f)) {
         Text(
-          text = "مرکز صوت و گفتار آفلاین (Voice AI)",
+          text = "مرکز صوت و گفتار آفلاین",
           color = TextPrimary,
           fontSize = 19.sp,
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "تبدیل صوت به متن (Whisper واقعی) و متن به گفتار (TTS سیستمی)",
+          text = "تبدیل صوت به متن (Whisper) و متن به گفتار (TTS سیستمی)",
           color = TextSecondary,
-          fontSize = 12.sp
+          fontSize = 11.sp,
+          lineHeight = 16.sp
         )
       }
+
+      Spacer(modifier = Modifier.width(8.dp))
 
       Box(
         modifier = Modifier

@@ -17,6 +17,7 @@ local.properties
 .env
 debug.keystore
 ci-runtime/
+/artifacts/
 # llama.cpp sources are fetched at build time (pinned in the CI workflow).
 app/src/main/cpp/llama.cpp/
 app/src/main/cpp/whisper.cpp/

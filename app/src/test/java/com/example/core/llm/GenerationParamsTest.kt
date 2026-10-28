@@ -30,7 +30,8 @@ class GenerationParamsTest {
     assertEquals(2f, p.temperature, 1e-6f)
     assertEquals(0.05f, p.topP, 1e-6f)
     assertEquals(0, p.topK)
-    assertEquals(4096, p.maxTokens)
+    // Context 512 leaves 128 tokens for the prompt and chat template.
+    assertEquals(384, p.maxTokens)
     assertEquals(1f, p.repeatPenalty, 1e-6f)
     assertEquals(512, p.contextTokens)
     assertEquals(8, p.threads)
@@ -49,5 +50,13 @@ class GenerationParamsTest {
     assertEquals(0.05f, p.topP, 1e-6f)
     assertEquals(2f, p.repeatPenalty, 1e-6f)
     assertEquals(8192, p.contextTokens)
+    assertEquals(512, p.maxTokens)
+  }
+
+  @Test
+  fun `answer length never exceeds the context headroom`() {
+    val p = GenerationParams(contextTokens = 2048, maxTokens = 4096).sanitized()
+    assertEquals(2048, p.contextTokens)
+    assertEquals(1536, p.maxTokens)
   }
 }

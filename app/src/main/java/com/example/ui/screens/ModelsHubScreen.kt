@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import com.example.core.model.CompatibilityLevel
 import com.example.core.model.ModelCapability
 import com.example.core.model.ModelMetadata
+import com.example.ui.theme.AccentCyan
 import com.example.ui.theme.BackgroundPitchBlack
 import com.example.ui.theme.NeonPinkContainer
 import com.example.ui.theme.NeonPinkLight
@@ -107,30 +108,61 @@ fun ModelsHubScreen(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Column {
+      Column(modifier = Modifier.weight(1f)) {
         Text(
-          text = "مدیریت مدل‌های محلی (AI Models)",
+          text = "مدیریت مدل‌های محلی",
           color = TextPrimary,
           fontSize = 19.sp,
           fontWeight = FontWeight.Bold
         )
         Text(
-          text = "تفکیک مدل‌های ذخیره‌شده روی حافظه و مدل‌های فعال در RAM",
+          text = "مدل‌های ذخیره‌شده و مدل‌های فعال در RAM",
           color = TextSecondary,
-          fontSize = 12.sp
+          fontSize = 11.5.sp
         )
       }
+
+      Spacer(modifier = Modifier.width(10.dp))
 
       Button(
         onClick = { filePicker.launch(arrayOf("*/*")) },
         colors = ButtonDefaults.buttonColors(containerColor = NeonPinkPrimary),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         modifier = Modifier.testTag("import_model_hub_button")
       ) {
         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
-        Text("وارد کردن مدل", fontSize = 12.sp)
+        Text("افزودن", color = BackgroundPitchBlack, fontSize = 12.sp, fontWeight = FontWeight.Bold)
       }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    val loadedCount = uiState.storedModels.count { it.isLoaded }
+    val freeRam = uiState.deviceProfile?.availRamGb
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+      ModelStatPill(
+        label = "ذخیره‌شده",
+        value = "${uiState.storedModels.size}",
+        accent = NeonPinkPrimary,
+        modifier = Modifier.weight(1f)
+      )
+      ModelStatPill(
+        label = "فعال در RAM",
+        value = "$loadedCount",
+        accent = TurboActiveGreen,
+        modifier = Modifier.weight(1f)
+      )
+      ModelStatPill(
+        label = "RAM آزاد",
+        value = freeRam?.let { "$it GB" } ?: "—",
+        accent = AccentCyan,
+        modifier = Modifier.weight(1f)
+      )
     }
 
     // Live weight-loading progress from the native loader (mmap read).
@@ -189,19 +221,101 @@ fun ModelsHubScreen(
       modifier = Modifier.fillMaxSize(),
       verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-      items(filteredModels) { model ->
+      if (filteredModels.isEmpty()) {
+        item(key = "empty_models") {
+          Column(
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(vertical = 36.dp, horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+          ) {
+            Box(
+              modifier = Modifier
+                .size(56.dp)
+                .clip(CircleShape)
+                .background(NeonPinkPrimary.copy(alpha = 0.12f)),
+              contentAlignment = Alignment.Center
+            ) {
+              Icon(
+                Icons.Default.Memory,
+                contentDescription = null,
+                tint = NeonPinkPrimary,
+                modifier = Modifier.size(26.dp)
+              )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+              text = if (uiState.storedModels.isEmpty()) "هنوز مدلی اضافه نشده" else "مدلی با این فیلتر پیدا نشد",
+              color = TextPrimary,
+              fontSize = 14.sp,
+              fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+              text = "فایل .gguf را از حافظهٔ گوشی انتخاب کنید؛ همان فایل مستقیماً با llama.cpp اجرا می‌شود.",
+              color = TextSecondary,
+              fontSize = 11.5.sp,
+              lineHeight = 18.sp,
+              textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(
+              onClick = { filePicker.launch(arrayOf("*/*")) },
+              shape = RoundedCornerShape(10.dp),
+              border = androidx.compose.foundation.BorderStroke(1.dp, NeonPinkPrimary.copy(alpha = 0.6f))
+            ) {
+              Icon(Icons.Default.Add, contentDescription = null, tint = NeonPinkPrimary, modifier = Modifier.size(15.dp))
+              Spacer(modifier = Modifier.width(5.dp))
+              Text("انتخاب فایل GGUF", color = NeonPinkPrimary, fontSize = 12.sp)
+            }
+          }
+        }
+      }
+
+      items(
+        items = filteredModels,
+        key = { it.id },
+        contentType = { "model" }
+      ) { model ->
         ModelCardItem(
           model = model,
           onLoad = {
-            val primaryCap = model.capabilities.firstOrNull() ?: ModelCapability.TEXT
+            // A llama.cpp GGUF can serve its text path even when it also advertises
+            // code or vision capabilities; do not reject it just because the list
+            // happens to start with a non-text capability.
+            val primaryCap = when {
+              model.capabilities.contains(ModelCapability.TEXT) -> ModelCapability.TEXT
+              model.capabilities.contains(ModelCapability.CODE) -> ModelCapability.CODE
+              else -> model.capabilities.firstOrNull() ?: ModelCapability.TEXT
+            }
             viewModel.loadModelInRegistry(model.id, primaryCap)
           },
           onUnload = {
             viewModel.unloadModelInRegistry(model.id)
-          }
+          },
+          modifier = Modifier.animateItem()
         )
       }
     }
+  }
+}
+
+@Composable
+private fun ModelStatPill(
+  label: String,
+  value: String,
+  accent: androidx.compose.ui.graphics.Color,
+  modifier: Modifier = Modifier
+) {
+  Column(
+    modifier = modifier
+      .clip(RoundedCornerShape(12.dp))
+      .background(SurfaceObsidianElevated)
+      .border(1.dp, SurfaceCardBorder, RoundedCornerShape(12.dp))
+      .padding(horizontal = 10.dp, vertical = 8.dp)
+  ) {
+    Text(text = value, color = accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+    Text(text = label, color = TextTertiary, fontSize = 9.5.sp, maxLines = 1)
   }
 }
 
@@ -232,10 +346,11 @@ private fun FilterChipItem(
 private fun ModelCardItem(
   model: ModelMetadata,
   onLoad: () -> Unit,
-  onUnload: () -> Unit
+  onUnload: () -> Unit,
+  modifier: Modifier = Modifier
 ) {
   Card(
-    modifier = Modifier.fillMaxWidth(),
+    modifier = modifier.fillMaxWidth(),
     colors = CardDefaults.cardColors(containerColor = SurfaceCard),
     border = androidx.compose.foundation.BorderStroke(
       1.dp,
@@ -250,7 +365,10 @@ private fun ModelCardItem(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
       ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+          modifier = Modifier.weight(1f),
+          verticalAlignment = Alignment.CenterVertically
+        ) {
           Box(
             modifier = Modifier
               .clip(RoundedCornerShape(6.dp))
@@ -268,9 +386,12 @@ private fun ModelCardItem(
           Text(
             text = "${model.architecture} • ${model.parameterCount}",
             color = TextSecondary,
-            fontSize = 11.sp
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
           )
         }
+        Spacer(modifier = Modifier.width(6.dp))
 
         // Status badge
         if (model.isLoaded) {
@@ -302,31 +423,27 @@ private fun ModelCardItem(
 
       Spacer(modifier = Modifier.height(4.dp))
 
-      // Capabilities row
-      Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        model.capabilities.forEach { cap ->
-          Text(
-            text = "#${cap.labelFa}",
-            color = TextPink,
-            fontSize = 10.5.sp
-          )
-        }
-      }
+      // Capabilities
+      Text(
+        text = model.capabilities.joinToString("   ") { "#${it.labelFa}" },
+          color = TextPink,
+          fontSize = 10.5.sp,
+          maxLines = 2,
+          overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+        )
 
       Spacer(modifier = Modifier.height(8.dp))
 
-      // Specs
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
-      ) {
+      // Specs stacked instead of squeezed side-by-side; long Persian labels and
+      // multi-gigabyte sizes no longer collide on narrow phones.
+      Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
           text = "کوانتیزاسیون: ${model.quantization} • کانتکست: ${model.contextLength}",
           color = TextSecondary,
           fontSize = 11.sp
         )
         Text(
-          text = "حجم: ${model.fileSizeFormatted} (تخمین رم: ${model.estimatedMemoryMb} MB)",
+          text = "حجم: ${model.fileSizeFormatted} • تخمین رم: ${model.estimatedMemoryMb} MB",
           color = TextSecondary,
           fontSize = 11.sp
         )
@@ -351,14 +468,16 @@ private fun ModelCardItem(
       ) {
         if (model.benchmarkTokPerSec != null) {
           Text(
-            text = "بنچمارک ثبت‌شده: ${model.benchmarkTokPerSec} t/s",
+            text = "${model.benchmarkTokPerSec} t/s",
             color = NeonPinkLight,
             fontSize = 11.5.sp,
-            fontWeight = FontWeight.Medium
+            fontWeight = FontWeight.Medium,
+            maxLines = 1
           )
         } else {
           Spacer(modifier = Modifier.width(1.dp))
         }
+        Spacer(modifier = Modifier.width(8.dp))
 
         if (model.isLoaded) {
           OutlinedButton(

@@ -81,7 +81,7 @@ object HardwareProfiler {
     val recommendedModel = when {
       totalRamMb >= 10_000L && availableRamMb >= 4_000L ->
         "۳B–۴B Q4 برای پیش‌فرض؛ ۷B فقط پس از پیش‌بررسی حافظه"
-      totalRamMb >= 7_000L -> "۱٫۵B–۳B Q4 (شروع محافظه‌کارانه)"
+      totalRamMb >= 7_000L -> "۳B Q4 پیشنهادی؛ ۷B–۸B Q3 فقط با mmap، بستن برنامه‌های دیگر و انتظار سرعت پایین"
       else -> "۱B–۲B Q4"
     }
     val recommendedContext = when {

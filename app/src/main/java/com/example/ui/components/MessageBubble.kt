@@ -16,8 +16,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
@@ -91,6 +93,7 @@ fun MessageBubble(
       // User Message Box (Dark Pink / Cyber style)
       Column(
         modifier = Modifier
+          .widthIn(max = 340.dp)
           .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp))
           .background(NeonPinkContainer)
           .border(1.dp, NeonPinkPrimary.copy(alpha = 0.4f), RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 4.dp))
@@ -139,7 +142,7 @@ fun MessageBubble(
         ) {
           Icon(
             imageVector = Icons.Default.AutoAwesome,
-            contentDescription = "DeepGGUF AI",
+            contentDescription = "Sali-Localo AI",
             tint = NeonPinkPrimary,
             modifier = Modifier.size(17.dp)
           )
@@ -159,26 +162,32 @@ fun MessageBubble(
             )
           }
 
-          // Generated Image Display (if any)
-          if (!message.imageResultUri.isNullOrEmpty()) {
-            val imgFile = File(message.imageResultUri)
-            if (imgFile.exists()) {
-              AsyncImage(
-                model = imgFile,
-                contentDescription = "تصویر تولید شده با هوش مصنوعی آفلاین",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                  .fillMaxWidth()
-                  .height(280.dp)
-                  .clip(RoundedCornerShape(14.dp))
-                  .border(1.dp, NeonPinkPrimary.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
-              )
-              Spacer(modifier = Modifier.height(10.dp))
+          // Generated Image Display (if any). The disk probe is memoised: doing a
+          // File.exists() inside composition costs the UI thread on every pass.
+          val generatedImage = remember(message.imageResultUri) {
+            message.imageResultUri?.takeIf { it.isNotEmpty() }?.let { path ->
+              File(path).takeIf { it.exists() }
             }
           }
+          if (generatedImage != null) {
+            AsyncImage(
+              model = generatedImage,
+              contentDescription = "تصویر تولید شده با هوش مصنوعی آفلاین",
+              contentScale = ContentScale.Crop,
+              modifier = Modifier
+                .fillMaxWidth()
+                .height(280.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .border(1.dp, NeonPinkPrimary.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+          }
 
-          // Rendered Markdown Content
-          MarkdownContent(rawText = message.content)
+          // Rendered Markdown Content, selectable so a single paragraph can be
+          // copied without reaching for the footer actions.
+          SelectionContainer {
+            MarkdownContent(rawText = message.content)
+          }
 
           // Footer Action Bar (Copy & Share)
           Row(

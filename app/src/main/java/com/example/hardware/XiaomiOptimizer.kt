@@ -38,6 +38,23 @@ data class HardwareTelemetry(
   val chipsetName: String
 )
 
+/**
+ * Device-specific starting point. Threads are split deliberately: generation is
+ * memory-bandwidth bound, so it uses four workers on this 2+6 CPU instead of all eight;
+ * prompt ingestion can use two more workers because it is throughput bound. Android still
+ * owns scheduling, so this is a worker count rather than a CPU-affinity pin.
+ * These are conservative recommendations, not measured tokens/sec numbers.
+ */
+data class DeviceTuningProfile(
+  val isTargetDevice: Boolean,
+  val deviceLabel: String,
+  val generationThreads: Int,
+  val promptThreads: Int,
+  val contextTokens: Int,
+  val recommendedModel: String,
+  val notes: List<String>
+)
+
 object XiaomiOptimizer {
   fun isXiaomiFamily(): Boolean {
     val brand = Build.BRAND.lowercase(Locale.ROOT)
@@ -125,14 +142,80 @@ object XiaomiOptimizer {
     )
   }
 
-  /** Suggested app worker count only; it does not pin threads to big or little CPU cores. */
+  /**
+   * Generation threads for this profile. More threads than physical big cores often make
+   * generation slower and hotter because llama.cpp is memory-bandwidth bound. The Redmi
+   * Note 14 Pro 4G (Helio G100-Ultra / 2×A76 + 6×A55) therefore uses 4 threads for Turbo.
+   *
+   * This only sets llama.cpp's worker count; Android/HyperOS still own frequency and affinity.
+   */
   fun getOptimalThreadCount(mode: PerformanceMode): Int {
     val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-    return when (mode) {
-      PerformanceMode.HYPER_TURBO -> minOf(6, cores)
-      PerformanceMode.BALANCED -> minOf(4, cores)
-      PerformanceMode.ECO_BATTERY -> minOf(2, cores)
-    }.coerceAtLeast(1)
+    val topology = CpuTopologyDetector.detect(cores)
+    // Unknown topology must not turn into "use every core": that is the slow, hot case.
+    val bigCores = if (topology.isKnown) {
+      topology.performanceCores
+    } else {
+      (cores / 4).coerceAtLeast(1)
+    }
+    val ceiling = (bigCores * 2).coerceIn(2, 6).coerceAtMost(cores)
+    val threads = when (mode) {
+      PerformanceMode.HYPER_TURBO -> ceiling
+      PerformanceMode.BALANCED -> (ceiling * 3) / 4
+      PerformanceMode.ECO_BATTERY -> ceiling / 2
+    }
+    return threads.coerceIn(1, cores)
+  }
+
+  /**
+   * Detects the Redmi Note 14 Pro 4G (and its rebadged Helio G99 siblings) from public
+   * build fields. No benchmark number is invented here; the UI only shows tuning choices.
+   */
+  fun getDeviceTuningProfile(mode: PerformanceMode): DeviceTuningProfile {
+    val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    val generationThreads = getOptimalThreadCount(mode)
+    val promptThreads = (generationThreads + 2)
+      .coerceAtMost(6)
+      .coerceAtMost(cores)
+      .coerceAtLeast(generationThreads)
+    val isG100Family = isHelioG100Family()
+    val modelName = Build.MODEL.takeIf(String::isNotBlank) ?: "Android device"
+
+    return if (isG100Family) {
+      DeviceTuningProfile(
+        isTargetDevice = true,
+        deviceLabel = "$modelName • Helio G100-Ultra",
+        generationThreads = generationThreads,
+        promptThreads = promptThreads,
+        contextTokens = 2048,
+        recommendedModel = "۳B–۴B Q4_K_M برای پاسخ روان؛ ۸B Q3_K_L با mmap اجرا می‌شود اما محسوساً کندتر است.",
+        notes = listOf(
+          "HyperOS: Autostart را روشن و صرفه‌جویی باتری Sali-Localo را روی «بدون محدودیت» بگذارید.",
+          "برای مدل ۸B، context را ۲۰۴۸ و حداکثر طول پاسخ را کوتاه نگه دارید.",
+          "دمای باتری بالای ۴۲°C معمولاً یعنی throttling؛ بین پاسخ‌ها چند لحظه استراحت دهید."
+        )
+      )
+    } else {
+      DeviceTuningProfile(
+        isTargetDevice = false,
+        deviceLabel = "$modelName • ${detectSocName()}",
+        generationThreads = generationThreads,
+        promptThreads = promptThreads,
+        contextTokens = 2048,
+        recommendedModel = "با آزمون روی دستگاه انتخاب کنید؛ ۳B–۴B Q4 نقطهٔ شروع محافظه‌کارانه است.",
+        notes = listOf("تعداد نخ تولید بر اساس هسته‌های فیزیکی شناسایی‌شده محدود شده است.")
+      )
+    }
+  }
+
+  private fun isHelioG100Family(): Boolean {
+    val hardware = buildString {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        append(Build.SOC_MODEL).append(' ').append(Build.SOC_MANUFACTURER).append(' ')
+      }
+      append(Build.HARDWARE).append(' ').append(Build.BOARD).append(' ').append(Build.DEVICE)
+    }.lowercase(Locale.ROOT)
+    return hardware.contains("g100") || hardware.contains("g99") || hardware.contains("mt6789")
   }
 
   /** Must only be called from a worker thread; never raise the Android UI thread priority. */

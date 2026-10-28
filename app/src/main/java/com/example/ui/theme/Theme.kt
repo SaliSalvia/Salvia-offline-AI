@@ -2,13 +2,25 @@ package com.example.ui.theme
 
 import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
+
+// Soft, consistent radii used by cards, dialogs, sheets and chips.
+private val AppShapes = Shapes(
+  extraSmall = RoundedCornerShape(8.dp),
+  small = RoundedCornerShape(11.dp),
+  medium = RoundedCornerShape(14.dp),
+  large = RoundedCornerShape(20.dp),
+  extraLarge = RoundedCornerShape(28.dp)
+)
 
 private val DarkPinkColorScheme = darkColorScheme(
   primary = NeonPinkPrimary,
@@ -33,7 +45,14 @@ private val DarkPinkColorScheme = darkColorScheme(
   onSurfaceVariant = TextSecondary,
 
   outline = SurfaceCardBorder,
-  outlineVariant = ReasoningBorder
+  outlineVariant = ReasoningBorder,
+
+  error = PerformanceBeastRed,
+  onError = TextPrimary,
+  errorContainer = ColorErrorContainer,
+  onErrorContainer = TextPrimary,
+
+  surfaceTint = NeonPinkPrimary
 )
 
 @Composable
@@ -57,6 +76,7 @@ fun MyApplicationTheme(
   MaterialTheme(
     colorScheme = DarkPinkColorScheme,
     typography = Typography,
+    shapes = AppShapes,
     content = content
   )
 }

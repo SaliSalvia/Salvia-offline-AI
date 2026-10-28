@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.util.Locale
 import com.example.ui.theme.NeonPinkLight
 import com.example.ui.theme.NeonPinkPrimary
 import com.example.ui.theme.ReasoningBorder
@@ -69,18 +70,30 @@ fun ThinkingProcessCard(
     mutableStateOf(isStreaming)
   }
 
-  val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-  val pulseAlpha by infiniteTransition.animateFloat(
-    initialValue = 0.4f,
-    targetValue = 1.0f,
-    animationSpec = infiniteRepeatable(
-      animation = tween(800, easing = FastOutSlowInEasing),
-      repeatMode = RepeatMode.Reverse
-    ),
-    label = "pulseAlpha"
-  )
+  // Only animate while a model is actually thinking. Historical reasoning cards
+  // used to keep an infinite 800 ms animation alive off-screen, wasting frames
+  // and battery for every old message in the list.
+  val pulseAlpha = if (isStreaming) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val animatedAlpha by infiniteTransition.animateFloat(
+      initialValue = 0.4f,
+      targetValue = 1.0f,
+      animationSpec = infiniteRepeatable(
+        animation = tween(800, easing = FastOutSlowInEasing),
+        repeatMode = RepeatMode.Reverse
+      ),
+      label = "pulseAlpha"
+    )
+    animatedAlpha
+  } else {
+    1f
+  }
 
-  val durationSeconds = String.format("%.1f", durationMs / 1000f)
+  // Streamed reasoning recomposes this card ~16 times per second; the formatted
+  // label only changes when the measured duration does.
+  val durationSeconds = remember(durationMs) {
+    String.format(Locale.US, "%.1f", durationMs / 1000f)
+  }
 
   Column(
     modifier = modifier

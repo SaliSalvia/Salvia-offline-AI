@@ -106,9 +106,9 @@ fun ImageHubScreen(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Column {
+      Column(modifier = Modifier.weight(1f)) {
         Text(
-          text = "استودیوی تصویرساز آفلاین (Diffusion)",
+          text = "استودیوی تصویرساز آفلاین",
           color = TextPrimary,
           fontSize = 19.sp,
           fontWeight = FontWeight.Bold
@@ -116,9 +116,12 @@ fun ImageHubScreen(
         Text(
           text = "پیش‌نمایش گرافیکی محلی؛ runtime واقعی Diffusion هنوز به این نسخه وصل نشده است.",
           color = TextSecondary,
-          fontSize = 11.5.sp
+          fontSize = 11.sp,
+          lineHeight = 16.sp
         )
       }
+
+      Spacer(modifier = Modifier.width(8.dp))
 
       Box(
         modifier = Modifier
@@ -126,7 +129,7 @@ fun ImageHubScreen(
           .background(NeonPinkContainer)
           .padding(horizontal = 8.dp, vertical = 4.dp)
       ) {
-        Text(text = "شتاب‌دهنده: تأییدنشده", color = NeonPinkLight, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+        Text(text = "تأییدنشده", color = NeonPinkLight, fontSize = 10.sp, fontWeight = FontWeight.Bold)
       }
     }
 

@@ -21,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 
@@ -36,6 +37,9 @@ std::mutex              g_model_mutex;   // load/unload
 std::mutex              g_generate_mutex; // serialize generation runs
 llama_model *           g_model = nullptr;
 llama_context *         g_ctx = nullptr;
+// llama_model_load_from_file_ptr does not own the FILE*, so keep it alive while
+// the model exists. Closing it immediately after load could break lazy reads.
+FILE *                  g_model_file = nullptr;
 uint32_t                g_ctx_size = 0;
 std::atomic<bool>       g_cancel{false};
 std::atomic<bool>       g_backend_ready{false};
@@ -243,14 +247,29 @@ bool run_generation(JNIEnv * env,
   if (n_train > 0 && want_ctx > static_cast<uint32_t>(n_train)) {
     want_ctx = static_cast<uint32_t>(n_train);
   }
-  if (prompt_tokens.size() + 8 >= want_ctx) {
-    // Keep at least a little generation head-room.
-    want_ctx = static_cast<uint32_t>(prompt_tokens.size() + 16);
-    if (n_train > 0 && want_ctx > static_cast<uint32_t>(n_train)) {
-      throw_runtime(env, "conversation is longer than the model context window");
-      return false;
-    }
+  // Never grow the allocated context to fit an oversized prompt: that silently
+  // bypassed the Kotlin memory preflight and could allocate gigabytes of KV cache.
+  // The Kotlin side trims history to the selected context; if it is still too long,
+  // fail cleanly instead of risking an OOM.
+  const int32_t headroom = static_cast<int32_t>(want_ctx) -
+      static_cast<int32_t>(prompt_tokens.size()) - 8;
+  if (headroom <= 0) {
+    throw_runtime(env, "conversation is longer than the selected context window");
+    return false;
   }
+  if (max_tokens > headroom) {
+    max_tokens = headroom;
+  }
+
+  const int gen_threads = n_threads > 0 ? n_threads : 4;
+  const unsigned int reported_hw_threads = std::thread::hardware_concurrency();
+  const int hw_threads = reported_hw_threads > 0
+                             ? static_cast<int>(reported_hw_threads)
+                             : gen_threads;
+  // Prompt ingestion is throughput bound, so it can use two more workers than generation.
+  // Generation stays at the caller-selected count (4 on a Helio G100-Ultra): going wider
+  // heats the phone without improving memory-bandwidth-bound token generation.
+  const int batch_threads = std::min(hw_threads, gen_threads + 2);
 
   // --- (re)create context if needed --------------------------------------
   if (g_ctx == nullptr || g_ctx_size != want_ctx) {
@@ -263,8 +282,8 @@ bool run_generation(JNIEnv * env,
     // Larger batches make prompt evaluation of long conversations much faster;
     // capped by the context window and kept RAM-safe on mid-range devices.
     cparams.n_batch = std::min<uint32_t>(1024, want_ctx);
-    cparams.n_threads = n_threads > 0 ? n_threads : 4;
-    cparams.n_threads_batch = cparams.n_threads;
+    cparams.n_threads = gen_threads;
+    cparams.n_threads_batch = batch_threads;
     cparams.abort_callback = abort_callback_fn;
     cparams.abort_callback_data = nullptr;
     g_ctx = llama_init_from_model(g_model, cparams);
@@ -275,8 +294,7 @@ bool run_generation(JNIEnv * env,
     g_ctx_size = want_ctx;
     g_prev_valid = false; // fresh KV cache
   } else {
-    llama_set_n_threads(g_ctx, n_threads > 0 ? n_threads : 4,
-                        n_threads > 0 ? n_threads : 4);
+    llama_set_n_threads(g_ctx, gen_threads, batch_threads);
   }
 
   // --- KV-cache reuse across chat turns ----------------------------------
@@ -463,14 +481,21 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromFd(JNIEnv * env, jclass,
   std::lock_guard<std::mutex> run_lock(g_generate_mutex);
   std::lock_guard<std::mutex> lock(g_model_mutex);
 
+  // The context owns references into the model: always free the context first.
+  // The previous order freed the model while the context was still alive, which
+  // could crash when the user switched from one GGUF model to another.
+  if (g_ctx != nullptr) {
+    llama_free(g_ctx);
+    g_ctx = nullptr;
+    g_ctx_size = 0;
+  }
   if (g_model != nullptr) {
     llama_model_free(g_model);
     g_model = nullptr;
-    if (g_ctx != nullptr) {
-      llama_free(g_ctx);
-      g_ctx = nullptr;
-      g_ctx_size = 0;
-    }
+  }
+  if (g_model_file != nullptr) {
+    fclose(g_model_file);
+    g_model_file = nullptr;
   }
   g_prev_tokens.clear();
   g_prev_valid = false;
@@ -503,7 +528,11 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromFd(JNIEnv * env, jclass,
     FILE * f = fdopen(static_cast<int>(fd), "rb");
     if (f != nullptr) {
       g_model = llama_model_load_from_file_ptr(f, mparams);
-      fclose(f); // consumes fd
+      if (g_model != nullptr) {
+        g_model_file = f; // owned by us until unload/next load
+      } else {
+        fclose(f);
+      }
     } else {
       close(static_cast<int>(fd));
     }
@@ -525,14 +554,18 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromPath(JNIEnv * env, jclass,
   std::lock_guard<std::mutex> run_lock(g_generate_mutex);
   std::lock_guard<std::mutex> lock(g_model_mutex);
 
+  if (g_ctx != nullptr) {
+    llama_free(g_ctx);
+    g_ctx = nullptr;
+    g_ctx_size = 0;
+  }
   if (g_model != nullptr) {
     llama_model_free(g_model);
     g_model = nullptr;
-    if (g_ctx != nullptr) {
-      llama_free(g_ctx);
-      g_ctx = nullptr;
-      g_ctx_size = 0;
-    }
+  }
+  if (g_model_file != nullptr) {
+    fclose(g_model_file);
+    g_model_file = nullptr;
   }
   g_prev_tokens.clear();
   g_prev_valid = false;
@@ -579,6 +612,10 @@ Java_com_example_core_llm_NativeLlama_nativeUnload(JNIEnv *, jclass) {
   if (g_model != nullptr) {
     llama_model_free(g_model);
     g_model = nullptr;
+  }
+  if (g_model_file != nullptr) {
+    fclose(g_model_file);
+    g_model_file = nullptr;
   }
   g_prev_tokens.clear();
   g_prev_valid = false;

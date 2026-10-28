@@ -92,7 +92,7 @@ fun FilesRagScreen(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically
     ) {
-      Column {
+      Column(modifier = Modifier.weight(1f)) {
         Text(
           text = "مرکز اسناد، ZIP و RAG آفلاین",
           color = TextPrimary,
@@ -102,18 +102,22 @@ fun FilesRagScreen(
         Text(
           text = "پارس پرونده‌ها، امنیت ضد Zip-Bomb و بازیابی وکتور کاملاً محلی",
           color = TextSecondary,
-          fontSize = 12.sp
+          fontSize = 11.5.sp,
+          lineHeight = 17.sp
         )
       }
+
+      Spacer(modifier = Modifier.width(10.dp))
 
       Button(
         onClick = { filePicker.launch(arrayOf("*/*")) },
         colors = ButtonDefaults.buttonColors(containerColor = NeonPinkPrimary),
-        shape = RoundedCornerShape(10.dp)
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp)
       ) {
         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(4.dp))
-        Text("افزودن سند/ZIP", fontSize = 12.sp)
+        Text("افزودن", color = BackgroundPitchBlack, fontSize = 12.sp, fontWeight = FontWeight.Bold)
       }
     }
 
