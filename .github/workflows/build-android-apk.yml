@@ -3,6 +3,7 @@ name: Android APK
 on:
   push:
     branches:
+      - main
       - arena/eef3a96d-salvia-offline-ai
   pull_request:
     branches:
@@ -192,7 +193,7 @@ jobs:
       - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
-          name: Salvia-offline-AI-release-apk
+          name: Sali-Localo-release-apk
           path: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/apk/release/app-release.apk.sha256

@@ -35,9 +35,9 @@
 
 ## 🚀 دریافت APK
 
-1. به صفحهٔ [Actions](https://github.com/SaliSalvia/Salvia-offline-AI/actions/workflows/build-android-apk.yml) بروید.
+1. به صفحهٔ [Actions](https://github.com/SaliSalvia/Sali-Localo/actions/workflows/build-android-apk.yml) بروید (هر پوش روی `main` به‌صورت خودکار APK می‌سازد).
 2. آخرین اجرای موفق (`Android APK`) را باز کنید.
-3. در بخش **Artifacts** فایل `Salvia-offline-AI-release-apk` را دانلود و `app-release.apk` را نصب کنید.
+3. در بخش **Artifacts** فایل `Sali-Localo-release-apk` را دانلود و `app-release.apk` را نصب کنید.
 
 هر نسخه با کلید انتشار پایدار امضا می‌شود؛ نصب‌های بعدی **در‌جا (in-place)** ارتقا می‌یابند.
 
