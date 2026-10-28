@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "DeepGGUF"
+rootProject.name = "Sali-Localo"
 
 include(":app")
