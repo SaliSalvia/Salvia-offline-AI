@@ -59,13 +59,20 @@ object AiRouter {
     }
 
     // 3. Image Generation cues
-    if (pLower.startsWith("تصویر") || pLower.startsWith("بکش") || pLower.startsWith("عکس بساز") ||
-        pLower.startsWith("/draw") || pLower.contains("طراحی کن") || pLower.contains("paint") || pLower.contains("generate image")) {
+    // Deliberately startsWith-only and command-shaped: a loose `contains` match here
+    // used to hijack ordinary chat like "تصویرش را توضیح بده" or "طراحی‌ات را بهتر کن"
+    // into the procedural image pipeline instead of answering with the LLM.
+    if (pLower.startsWith("تصویر بساز") || pLower.startsWith("بکش") || pLower.startsWith("عکس بساز") ||
+        pLower.startsWith("طراحی کن") || pLower.startsWith("/draw") || pLower.startsWith("paint") ||
+        pLower.startsWith("generate image")) {
       val cleaned = prompt
-        .removePrefix("تصویر")
+        .removePrefix("تصویر بساز")
         .removePrefix("بکش")
         .removePrefix("عکس بساز")
+        .removePrefix("طراحی کن")
         .removePrefix("/draw")
+        .removePrefix("paint")
+        .removePrefix("generate image")
         .trim()
       return RoutedTask(
         engine = TargetEngine.DIFFUSION_IMAGE,
@@ -76,7 +83,12 @@ object AiRouter {
     }
 
     // 4. TTS cues
-    if (pLower.contains("بخوان") || pLower.contains("صدا کن") || pLower.contains("/speak") || pLower.contains("تبدیل به گفتار") || pLower.contains("پخش صوتی")) {
+    // Deliberately startsWith-only: a loose `contains` match here used to hijack
+    // ordinary chat like "این کد را بخوان و باگ پیدا کن" into the speech pipeline
+    // instead of answering with the LLM. Only an explicit command at the very
+    // start of the message is treated as a speech request.
+    if (pLower.startsWith("بخوان") || pLower.startsWith("صدا کن") || pLower.startsWith("/speak") ||
+        pLower.startsWith("تبدیل به گفتار") || pLower.startsWith("پخش صوتی")) {
       return RoutedTask(
         engine = TargetEngine.TEXT_TO_SPEECH,
         requiredCapability = ModelCapability.TEXT_TO_SPEECH,

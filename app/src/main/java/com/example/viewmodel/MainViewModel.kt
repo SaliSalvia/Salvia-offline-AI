@@ -441,7 +441,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun speakMessageText(text: String) {
     _uiState.value = _uiState.value.copy(isSpeakingAudio = true)
-    audioEngine.speakText(text)
+    audioEngine.speakText(text) {
+      // Posted on the main looper by AudioEngine once speech really ends,
+      // fails, or is stopped — the button state can never get stuck again.
+      _uiState.update { it.copy(isSpeakingAudio = false) }
+    }
   }
 
   fun stopAudioPlayback() {
@@ -1016,6 +1020,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun stopGeneration(showNotice: Boolean = true) {
     llmEngine.cancel()
+    asrEngine.cancel()
     activeGenerationJob?.cancel()
     activeGenerationJob = null
     cancelActiveImageGeneration()
@@ -1137,6 +1142,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
       }
     }
+  }
+
+  /**
+   * Asks an in-flight Whisper transcription to stop; the running job then
+   * fails honestly as "transcription cancelled" and the UI state resets.
+   */
+  fun cancelTranscription() {
+    asrEngine.cancel()
   }
 
   fun transcribeAudioUri(uri: Uri, fileName: String) {

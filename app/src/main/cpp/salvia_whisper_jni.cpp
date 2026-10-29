@@ -146,6 +146,14 @@ Java_com_example_core_asr_NativeWhisper_nativeWhisperFree(JNIEnv *, jobject) {
   g_last_language.clear();
 }
 
+// Deliberately does NOT take g_mutex: nativeWhisperTranscribe holds that mutex
+// for the whole run, so the only way to interrupt a long transcription is to
+// flip the atomic cancel flag from another thread while it is running.
+JNIEXPORT void JNICALL
+Java_com_example_core_asr_NativeWhisper_nativeWhisperCancel(JNIEnv *, jobject) {
+  g_cancel.store(true, std::memory_order_relaxed);
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_example_core_asr_NativeWhisper_nativeWhisperTranscribe(
     JNIEnv * env, jobject, jfloatArray jsamples, jint n_samples,

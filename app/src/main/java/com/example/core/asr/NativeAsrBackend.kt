@@ -81,4 +81,12 @@ class NativeAsrBackend : AsrBackend {
       emptyArray()
     }
   }
+
+  override fun cancel() {
+    if (!isAvailable()) return
+    try {
+      NativeWhisper.nativeWhisperCancel()
+    } catch (_: Throwable) {
+    }
+  }
 }

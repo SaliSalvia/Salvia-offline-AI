@@ -1,23 +1,26 @@
 package com.example.core.voice
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
-import kotlin.math.sin
 
 /**
  * Text-to-speech only (Android system TTS, offline). Speech-to-text is a real
  * whisper.cpp pipeline in [com.example.core.asr.RealAsrEngine] — there is no
  * simulated transcription anywhere in this app.
+ *
+ * Every [speakText] call reports its [onFinished] callback exactly once,
+ * whether the engine spoke to the end, was stopped, failed, or was never
+ * ready at all — the UI must never be left in an eternal "speaking" state.
  */
 class AudioEngine(private val context: Context) {
   private var tts: TextToSpeech? = null
   private var isTtsInitialized = false
-  private var audioTrack: AudioTrack? = null
-  private var isSynthesizing = false
+  private var pendingOnFinished: (() -> Unit)? = null
+  private val mainHandler = Handler(Looper.getMainLooper())
 
   init {
     tts = TextToSpeech(context) { status ->
@@ -26,64 +29,49 @@ class AudioEngine(private val context: Context) {
         isTtsInitialized = true
       }
     }
+    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+      override fun onStart(utteranceId: String?) {}
+
+      override fun onDone(utteranceId: String?) {
+        if (utteranceId == UTTERANCE_ID) {
+          notifyFinished()
+        }
+      }
+
+      @Deprecated("Deprecated in Java")
+      override fun onError(utteranceId: String?) {
+        if (utteranceId == UTTERANCE_ID) {
+          notifyFinished()
+        }
+      }
+    })
   }
 
   fun speakText(text: String, onFinished: (() -> Unit)? = null) {
+    pendingOnFinished = onFinished
     if (isTtsInitialized && tts != null) {
-      tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "DEEP_GGUF_TTS")
+      tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
     } else {
-      // Fallback native sound synthesis
-      playBeepTone()
+      // No system TTS engine installed (or still initializing): report
+      // completion immediately instead of playing a mystery beep while the
+      // UI waits forever for a callback that would never arrive.
+      notifyFinished()
     }
   }
 
   fun stopSpeech() {
     tts?.stop()
-    try {
-      audioTrack?.stop()
-      audioTrack?.release()
-      audioTrack = null
-    } catch (_: Exception) {}
-    isSynthesizing = false
+    notifyFinished()
   }
 
-  private fun playBeepTone() {
-    try {
-      val sampleRate = 22050
-      val numSamples = sampleRate / 2
-      val sample = DoubleArray(numSamples)
-      val generatedSnd = ByteArray(2 * numSamples)
+  /** Runs the stored completion once on the main thread; later calls are no-ops. */
+  private fun notifyFinished() {
+    val callback = pendingOnFinished
+    pendingOnFinished = null
+    callback?.let { mainHandler.post(it) }
+  }
 
-      for (i in 0 until numSamples) {
-        sample[i] = sin(2 * Math.PI * i / (sampleRate / 440.0))
-      }
-
-      var idx = 0
-      for (dVal in sample) {
-        val valShort = (dVal * 32767).toInt().toShort()
-        generatedSnd[idx++] = (valShort.toInt() and 0x00ff).toByte()
-        generatedSnd[idx++] = ((valShort.toInt() and 0xff00) ushr 8).toByte()
-      }
-
-      audioTrack = AudioTrack.Builder()
-        .setAudioAttributes(
-          AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-            .build()
-        )
-        .setAudioFormat(
-          AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(sampleRate)
-            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-            .build()
-        )
-        .setBufferSizeInBytes(generatedSnd.size)
-        .build()
-
-      audioTrack?.write(generatedSnd, 0, generatedSnd.size)
-      audioTrack?.play()
-    } catch (_: Exception) {}
+  private companion object {
+    const val UTTERANCE_ID = "DEEP_GGUF_TTS"
   }
 }

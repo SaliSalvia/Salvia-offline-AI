@@ -274,6 +274,23 @@ fun VoiceHubScreen(
           )
         }
 
+        if (uiState.isTranscribing) {
+          Spacer(modifier = Modifier.height(8.dp))
+
+          Button(
+            onClick = { viewModel.cancelTranscription() },
+            colors = ButtonDefaults.buttonColors(containerColor = PerformanceBeastRed),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("cancel_transcription_button")
+          ) {
+            Icon(Icons.Default.Stop, contentDescription = null, tint = BackgroundPitchBlack)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("توقف رونویسی", color = BackgroundPitchBlack, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+          }
+        }
+
         if (uiState.lastTranscription != null) {
           Spacer(modifier = Modifier.height(12.dp))
           Box(
