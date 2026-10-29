@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -58,7 +59,10 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -163,6 +167,8 @@ fun MainChatScreen(
   var inputText by remember { mutableStateOf("") }
   var showAttachMenu by remember { mutableStateOf(false) }
   var ggufTargetSlot by remember { mutableStateOf("TEXT") }
+  var searchQuery by remember { mutableStateOf("") }
+  var showChatSearch by remember { mutableStateOf(false) }
 
   // File pickers using Storage Access Framework (SAF)
   val filePicker = rememberLauncherForActivityResult(
@@ -630,6 +636,49 @@ fun MainChatScreen(
                 tint = TextTertiary,
                 modifier = Modifier.size(16.dp)
               )
+            }
+
+            if (uiState.currentScreen == AppScreen.CHAT) {
+              // Search inside the current conversation transcript.
+              IconButton(
+                onClick = {
+                  showChatSearch = !showChatSearch
+                  if (!showChatSearch) searchQuery = ""
+                },
+                modifier = Modifier
+                  .size(40.dp)
+                  .testTag("chat_search_toggle_button")
+              ) {
+                Icon(
+                  Icons.Default.Search,
+                  contentDescription = "جست‌وجو در گفت‌وگو",
+                  tint = if (showChatSearch) NeonPinkPrimary else TextSecondary,
+                  modifier = Modifier.size(19.dp)
+                )
+              }
+
+              // Export the whole transcript as Markdown via the Android share sheet.
+              IconButton(
+                onClick = {
+                  val markdown = viewModel.exportSessionAsMarkdown()
+                  val sendIntent = Intent().apply {
+                    action = Intent.ACTION_SEND
+                    putExtra(Intent.EXTRA_TEXT, markdown)
+                    type = "text/markdown"
+                  }
+                  context.startActivity(Intent.createChooser(sendIntent, "خروجی گفت‌وگو (Markdown)"))
+                },
+                modifier = Modifier
+                  .size(40.dp)
+                  .testTag("export_session_button")
+              ) {
+                Icon(
+                  Icons.Default.Share,
+                  contentDescription = "خروجی گفت‌وگو",
+                  tint = TextSecondary,
+                  modifier = Modifier.size(19.dp)
+                )
+              }
             }
 
             // One-tap new conversation keeps the top bar calm.
@@ -1185,16 +1234,54 @@ fun MainChatScreen(
                 )
               }
             } else {
-              LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 10.dp, bottom = 64.dp)
-              ) {
-                items(
-                  items = uiState.messages,
-                  key = { it.id },
-                  contentType = { "message" }
-                ) { msg ->
+              Column(modifier = Modifier.fillMaxSize()) {
+                // In-conversation search field (toggled from the top bar).
+                AnimatedVisibility(visible = showChatSearch) {
+                  OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("جست‌وجو در این گفت‌وگو…", color = TextTertiary, fontSize = 12.sp) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                      focusedContainerColor = BackgroundPitchBlack,
+                      unfocusedContainerColor = BackgroundPitchBlack,
+                      focusedBorderColor = NeonPinkPrimary,
+                      unfocusedBorderColor = SurfaceCardBorder,
+                      focusedTextColor = TextPrimary,
+                      unfocusedTextColor = TextPrimary
+                    ),
+                    trailingIcon = {
+                      if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(24.dp)) {
+                          Icon(Icons.Default.Close, contentDescription = "پاک کردن", tint = TextTertiary, modifier = Modifier.size(15.dp))
+                        }
+                      }
+                    },
+                    modifier = Modifier
+                      .fillMaxWidth()
+                      .padding(horizontal = 14.dp, vertical = 4.dp)
+                      .testTag("chat_search_field")
+                  )
+                }
+
+                LazyColumn(
+                  state = listState,
+                  modifier = Modifier.fillMaxSize(),
+                  contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 10.dp, bottom = 64.dp)
+                ) {
+                  items(
+                    items = if (searchQuery.isBlank()) {
+                      uiState.messages
+                    } else {
+                      uiState.messages.filter { msg ->
+                        msg.content.contains(searchQuery, ignoreCase = true) ||
+                          (msg.thinkingContent ?: "").contains(searchQuery, ignoreCase = true)
+                      }
+                    },
+                    key = { it.id },
+                    contentType = { "message" }
+                  ) { msg ->
                   MessageBubble(
                     message = msg,
                     currentLanguage = uiState.appLanguage,
@@ -1235,9 +1322,10 @@ fun MainChatScreen(
                   }
                 }
 
-                if (uiState.isStreaming) {
-                  item(key = "live_generation", contentType = "live") {
-                    LiveGenerationItem(viewModel = viewModel)
+                  if (uiState.isStreaming) {
+                    item(key = "live_generation", contentType = "live") {
+                      LiveGenerationItem(viewModel = viewModel)
+                    }
                   }
                 }
               }

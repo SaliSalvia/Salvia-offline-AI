@@ -428,6 +428,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     _uiState.value = _uiState.value.copy(statusNotice = null, routerNotice = null)
   }
 
+  /**
+   * Exports the current session transcript as Markdown (roles as headers, thinking
+   * as a blockquote) so the user can archive or share the whole conversation.
+   */
+  fun exportSessionAsMarkdown(): String {
+    val session = _uiState.value.currentSession
+    val messages = _uiState.value.messages
+    val sb = StringBuilder()
+    sb.append("# ").append(session?.title ?: "گفت‌وگو").append('\n').append('\n')
+    if (messages.isEmpty()) {
+      sb.append("(این گفت‌وگو خالی است)").append('\n').append('\n')
+    }
+    for (msg in messages) {
+      when (msg.role) {
+        "user" -> sb.append("## 🧑 کاربر").append('\n').append('\n').append(msg.content).append('\n').append('\n')
+        "assistant" -> {
+          sb.append("## 🤖 دستیار").append('\n').append('\n')
+          msg.thinkingContent?.takeIf { it.isNotBlank() }?.let {
+            sb.append("> 💭 استدلال مدل:").append('\n').append("> ")
+              .append(it.replace("\n", "\n> ")).append('\n').append('\n')
+          }
+          sb.append(msg.content).append('\n').append('\n')
+          msg.imageResultUri?.takeIf { it.isNotBlank() }?.let {
+            sb.append("(تصویر تولیدشده در مسیر: ").append(it).append(")").append('\n').append('\n')
+          }
+        }
+        else -> sb.append("### ").append(msg.role).append('\n').append('\n').append(msg.content).append('\n').append('\n')
+      }
+    }
+    sb.append("---").append('\n').append("_Sali-Localo — استنتاج آفلاین روی دستگاه_").append('\n')
+    return sb.toString()
+  }
+
   fun executeRagQuery(query: String) {
     viewModelScope.launch(Dispatchers.IO) {
       val results = ragEngine.retrieve(query)
