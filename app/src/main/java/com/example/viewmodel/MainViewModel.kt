@@ -784,7 +784,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val priorMessages = _uiState.value.messages.dropLast(1)
 
     viewModelScope.launch(Dispatchers.IO) {
-      val ragHits = ragEngine.retrieve(trimmed, topK = 3).filter { it.similarityScore >= 0.15f }
+      // BM25 scores are corpus-relative and unbounded (unlike the old cosine), so a fixed
+      // cutoff is meaningless. Keep hits meaningfully close to the best hit instead.
+      val retrievedHits = ragEngine.retrieve(trimmed, topK = 3)
+      val bestHitScore = retrievedHits.maxOfOrNull { it.similarityScore } ?: 0f
+      val ragHits = retrievedHits.filter { it.similarityScore > 0f && it.similarityScore >= 0.35f * bestHitScore }
       val userContent = buildUserContentWithAttachments(trimmed, stagedFiles, ragHits)
       chatDao.insertMessage(userMsg)
 

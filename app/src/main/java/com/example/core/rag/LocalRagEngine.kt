@@ -2,14 +2,13 @@ package com.example.core.rag
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlin.math.sqrt
+import kotlin.math.ln
 
 data class DocumentChunk(
   val id: String,
   val documentName: String,
   val chunkIndex: Int,
   val text: String,
-  val vector: FloatArray,
   val charCount: Int
 )
 
@@ -24,60 +23,115 @@ data class RagIndexSummary(
   val indexedDocumentNames: List<String>
 )
 
+/**
+ * Fully offline lexical retrieval using Okapi BM25 over [SearchTextNormalizer]-folded
+ * tokens.
+ *
+ * The previous engine hashed each chunk into a fixed 128-dim sign vector and ranked by
+ * cosine similarity. Hash collisions made those scores noisy and the 0..1 cosine
+ * cutoff in the caller arbitrary. BM25 is the classic, well-understood lexical ranker:
+ * term frequency saturation, length normalization and document frequency weighting —
+ * with no embedding model required, keeping the app 100% offline.
+ *
+ * [RetrievalResult.similarityScore] is the raw BM25 score (unbounded, > 0 only when at
+ * least one query term actually occurs in the chunk), so callers should rank/filter
+ * relative to the best hit rather than with a fixed cutoff.
+ */
 class LocalRagEngine {
-  private val vectorStore = mutableListOf<DocumentChunk>()
-  private val embeddingDimension = 128
+  private data class ChunkRecord(
+    val chunk: DocumentChunk,
+    val termFreqs: Map<String, Int>,
+    val tokenCount: Int
+  )
+
+  private val records = mutableListOf<ChunkRecord>()
+
+  // Number of chunks containing each term (document frequency for BM25).
+  // Kept in sync when a document is re-indexed so the statistics stay honest.
+  private val docFreq = mutableMapOf<String, Int>()
+
+  private val k1 = 1.5f
+  private val b = 0.75f
 
   suspend fun indexDocument(documentName: String, content: String): Int = withContext(Dispatchers.Default) {
     val chunks = chunkText(content, chunkSize = 400, overlap = 80)
-    val indexedChunks = mutableListOf<DocumentChunk>()
-
-    chunks.forEachIndexed { index, chunkText ->
-      val vector = computeLocalEmbedding(chunkText)
-      val chunk = DocumentChunk(
-        id = "${documentName}_chunk_$index",
-        documentName = documentName,
-        chunkIndex = index,
-        text = chunkText,
-        vector = vector,
-        charCount = chunkText.length
+    val newRecords = chunks.mapIndexed { index, chunkText ->
+      val tokens = SearchTextNormalizer.tokenize(chunkText)
+      ChunkRecord(
+        chunk = DocumentChunk(
+          id = "${documentName}_chunk_$index",
+          documentName = documentName,
+          chunkIndex = index,
+          text = chunkText,
+          charCount = chunkText.length
+        ),
+        termFreqs = tokens.groupingBy { it }.eachCount(),
+        tokenCount = tokens.size
       )
-      indexedChunks.add(chunk)
     }
 
-    synchronized(vectorStore) {
-      vectorStore.removeAll { it.documentName == documentName }
-      vectorStore.addAll(indexedChunks)
+    synchronized(records) {
+      // Drop the stale statistics of a re-indexed document before adding the new ones.
+      val removed = records.removeAll { it.chunk.documentName == documentName }
+      for (rec in removed) {
+        for ((term, tf) in rec.termFreqs) {
+          if (tf > 0) {
+            val left = (docFreq[term] ?: 0) - 1
+            if (left > 0) docFreq[term] = left else docFreq.remove(term)
+          }
+        }
+      }
+      for (rec in newRecords) {
+        for ((term, tf) in rec.termFreqs) {
+          if (tf > 0) docFreq[term] = (docFreq[term] ?: 0) + 1
+        }
+      }
+      records.addAll(newRecords)
     }
 
-    indexedChunks.size
+    newRecords.size
   }
 
   suspend fun retrieve(query: String, topK: Int = 3): List<RetrievalResult> = withContext(Dispatchers.Default) {
-    if (vectorStore.isEmpty()) return@withContext emptyList()
-    val queryVector = computeLocalEmbedding(query)
+    if (records.isEmpty()) return@withContext emptyList()
+    val queryTokens = SearchTextNormalizer.tokenize(query).distinct()
+    if (queryTokens.isEmpty()) return@withContext emptyList()
 
-    val scored = synchronized(vectorStore) {
-      vectorStore.map { chunk ->
-        val sim = cosineSimilarity(queryVector, chunk.vector)
-        RetrievalResult(chunk, sim)
+    val scored = synchronized(records) {
+      val n = records.size
+      val avgLen = (records.sumOf { it.tokenCount }.toFloat() / n).coerceAtLeast(1f)
+      records.map { rec ->
+        var score = 0f
+        for (term in queryTokens) {
+          val tf = rec.termFreqs[term] ?: 0
+          if (tf == 0) continue
+          val df = docFreq[term] ?: 0
+          if (df == 0) continue
+          val idf = ln(1f + (n - df + 0.5f) / (df + 0.5f))
+          val lenNorm = k1 * (1f - b + b * (rec.tokenCount / avgLen))
+          score += idf * (tf * (k1 + 1f)) / (tf + lenNorm)
+        }
+        RetrievalResult(rec.chunk, score)
       }
     }
 
-    scored.sortedByDescending { it.similarityScore }.take(topK)
+    scored.filter { it.similarityScore > 0f }
+      .sortedByDescending { it.similarityScore }
+      .take(topK)
   }
 
-  fun getSummary(): RagIndexSummary = synchronized(vectorStore) {
-    val docs = vectorStore.map { it.documentName }.distinct()
+  fun getSummary(): RagIndexSummary = synchronized(records) {
+    val docs = records.map { it.chunk.documentName }.distinct()
     RagIndexSummary(
       totalDocuments = docs.size,
-      totalChunks = vectorStore.size,
+      totalChunks = records.size,
       indexedDocumentNames = docs
     )
   }
 
-  fun clearIndex() = synchronized(vectorStore) {
-    vectorStore.clear()
+  fun clearIndex() = synchronized(records) {
+    records.clear()
+    docFreq.clear()
   }
 
   private fun chunkText(text: String, chunkSize: Int, overlap: Int): List<String> {
@@ -93,48 +147,5 @@ class LocalRagEngine {
       start += (chunkSize - overlap).coerceAtLeast(50)
     }
     return chunks
-  }
-
-  /**
-   * Computes a deterministic normalized semantic representation vector
-   * for local offline Persian and English text matching.
-   */
-  private fun computeLocalEmbedding(text: String): FloatArray {
-    val vector = FloatArray(embeddingDimension) { 0f }
-    val normalized = text.lowercase().trim()
-    val words = normalized.split(Regex("[\\s,;:.،؛؟!]+")).filter { it.length > 1 }
-
-    for (word in words) {
-      val hash = word.hashCode()
-      val index = Math.abs(hash) % embeddingDimension
-      val sign = if (hash >= 0) 1.0f else -1.0f
-      vector[index] += sign * 1.5f
-
-      // Also hash character n-grams for typo & morphology tolerance
-      for (i in 0 until word.length - 1) {
-        val bigram = word.substring(i, i + 2)
-        val bIndex = Math.abs(bigram.hashCode()) % embeddingDimension
-        vector[bIndex] += 0.5f
-      }
-    }
-
-    // L2 Normalize
-    var sumSq = 0f
-    for (v in vector) sumSq += v * v
-    val mag = sqrt(sumSq)
-    if (mag > 0.00001f) {
-      for (i in vector.indices) {
-        vector[i] /= mag
-      }
-    }
-    return vector
-  }
-
-  private fun cosineSimilarity(v1: FloatArray, v2: FloatArray): Float {
-    var dot = 0f
-    for (i in 0 until minOf(v1.size, v2.size)) {
-      dot += v1[i] * v2[i]
-    }
-    return dot.coerceIn(-1f, 1f)
   }
 }
