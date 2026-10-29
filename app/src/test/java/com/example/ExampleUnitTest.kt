@@ -36,14 +36,30 @@ class ExampleUnitTest {
 
   @Test
   fun testAiRouterRouting() {
-    val drawTask = AiRouter.routeRequest("تصویر یک گل رز در شب", emptyList())
+    // Image generation now requires an explicit leading command ("بکش…",
+    // "تصویر بساز…", "/draw…"). A message that merely contains the word
+    // "تصویر" must reach the LLM, never the image pipeline.
+    val drawTask = AiRouter.routeRequest("بکش یک گل رز در شب", emptyList())
     assertEquals(TargetEngine.DIFFUSION_IMAGE, drawTask.engine)
+
+    val drawCommand = AiRouter.routeRequest("تصویر بساز یک گل رز در شب", emptyList())
+    assertEquals(TargetEngine.DIFFUSION_IMAGE, drawCommand.engine)
+
+    // Regression: "تصویرش را توضیح بده" used to be hijacked into DIFFUSION_IMAGE.
+    val describeImage = AiRouter.routeRequest("تصویرش را توضیح بده", emptyList())
+    assertEquals(TargetEngine.TEXT_LLM, describeImage.engine)
 
     val codeTask = AiRouter.routeRequest("یک تابع پایتون برای مرتب سازی بنویس", emptyList())
     assertEquals(TargetEngine.CODING_LLM, codeTask.engine)
 
-    val ttsTask = AiRouter.routeRequest("این پیام را بخوان", emptyList())
+    // Speech likewise needs an explicit leading command ("بخوان…"), while
+    // "این کد را بخوان و باگ پیدا کن" is a question for the coding LLM —
+    // it used to be hijacked into TEXT_TO_SPEECH.
+    val ttsTask = AiRouter.routeRequest("بخوان این پیام را", emptyList())
     assertEquals(TargetEngine.TEXT_TO_SPEECH, ttsTask.engine)
+
+    val readCodeTask = AiRouter.routeRequest("این کد را بخوان و باگ پیدا کن", emptyList())
+    assertEquals(TargetEngine.CODING_LLM, readCodeTask.engine)
   }
 
   @Test
