@@ -3,6 +3,7 @@ package com.example.viewmodel
 import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
+import java.io.ByteArrayOutputStream
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
@@ -112,6 +113,8 @@ data class ChatUiState(
   val isSpeakingAudio: Boolean = false,
   val ttsSpeed: Float = 1.0f,
   val inferenceBackendLabel: String = "cpu",
+  val visionProjectorLabel: String? = null,
+  val isVisionReady: Boolean = false,
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
   val isTranscribing: Boolean = false,
@@ -563,6 +566,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       withContext(Dispatchers.Main) {
         _uiState.value = _uiState.value.copy(
           textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+          visionProjectorLabel = null,
+          isVisionReady = false,
           statusNotice = "مدل از حافظه خارج شد و منابع آزاد شدند."
         )
       }
@@ -710,6 +715,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = slot,
+              visionProjectorLabel = null,
+              isVisionReady = false,
               activeContextTokens = effectiveContext,
               generationParams = updatedParams,
               modelLoadPercent = null,
@@ -722,6 +729,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+              visionProjectorLabel = null,
+              isVisionReady = false,
               modelLoadPercent = null,
               statusNotice = "بارگذاری مدل ناموفق بود: ${outcome.reason}"
             )
@@ -814,6 +823,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // 2. Run Intelligent Router
     val routed = AiRouter.routeRequest(trimmed, stagedFiles)
     _uiState.value = _uiState.value.copy(routerNotice = routed.explanationFa)
+
+    // Vision path: an attached image with a loaded mmproj projector goes to
+    // real multimodal inference (mtmd), not to a text summary of the file.
+    val attachedImage = stagedFiles.firstOrNull { it.category == com.example.files.FileCategory.IMAGE }
+    if (attachedImage != null) {
+      if (_uiState.value.isVisionReady) {
+        activeGenerationJob?.cancel()
+        executeVisionGeneration(session.id, trimmed.ifBlank { "این تصویر را توصیف کن." }, attachedImage)
+        return
+      }
+      _uiState.value = _uiState.value.copy(
+        statusNotice = "برای تحلیل واقعی تصویر، ابتدا مدل متنی و سپس پروژکتور بینایی (mmproj) را از بخش «مدل‌ها» بارگذاری کنید."
+      )
+      return
+    }
 
     if (routed.engine == TargetEngine.DIFFUSION_IMAGE) {
       activeGenerationJob?.cancel()
@@ -1081,6 +1105,131 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * Real multimodal turn: the attached image is decoded and evaluated through
+   * the loaded mmproj projector (mtmd) against the text model, streaming the
+   * answer exactly like a text turn. KV reuse is disabled natively for vision.
+   */
+  private fun executeVisionGeneration(sessionId: Long, question: String, image: AttachedFile) {
+    val guardSnapshot = _uiState.value.resourceSnapshot
+    if (guardSnapshot == null || !guardSnapshot.isAiExecutionAllowed) {
+      _uiState.update {
+        it.copy(
+          statusNotice = "اجرای AI متوقف است: " +
+            (guardSnapshot?.activeConstraintReason ?: "پایش اولیهٔ منابع هنوز آماده نیست.")
+        )
+      }
+      return
+    }
+
+    val userMsg = ChatMessageEntity(
+      sessionId = sessionId,
+      role = "user",
+      content = "🖼️ [تحلیل بینایی آفلاین]: " + question,
+      attachmentsJson = "IMAGE:" + image.fileName + ":" + image.sizeFormatted
+    )
+    _uiState.value = _uiState.value.copy(
+      messages = _uiState.value.messages + userMsg,
+      attachedFiles = emptyList(),
+      isStreaming = true
+    )
+    tokenBatcher.reset()
+    thinkingBatcher.reset()
+    _liveStream.value = LiveStreamState()
+
+    activeGenerationJob?.cancel()
+    activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
+      chatDao.insertMessage(userMsg)
+
+      // Read the image bytes straight from the content URI (capped at 12 MB).
+      val imageBytes = try {
+        val capped = 12L * 1024L * 1024L
+        getApplication<Application>().contentResolver.openInputStream(Uri.parse(image.uri))?.use { stream ->
+          val buffer = ByteArrayOutputStream()
+          val chunk = ByteArray(64 * 1024)
+          var readTotal = 0L
+          while (readTotal < capped) {
+            val n = stream.read(chunk, 0, minOf(chunk.size, (capped - readTotal).toInt()))
+            if (n <= 0) break
+            buffer.write(chunk, 0, n)
+            readTotal += n
+          }
+          buffer.toByteArray()
+        }
+      } catch (_: Exception) {
+        null
+      }
+      if (imageBytes == null || imageBytes.isEmpty()) {
+        withContext(Dispatchers.Main) {
+          tokenBatcher.reset()
+          thinkingBatcher.reset()
+          _liveStream.value = LiveStreamState()
+          _uiState.value = _uiState.value.copy(
+            isStreaming = false,
+            statusNotice = "خواندن فایل تصویر ممکن نشد."
+          )
+        }
+        return@launch
+      }
+
+      XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
+
+      val params = _uiState.value.generationParams
+        .copy(contextTokens = _uiState.value.activeContextTokens)
+        .sanitized()
+
+      val outcome = llmEngine.generateVision(
+        question = question,
+        imageBytes = imageBytes,
+        params = params,
+        onThinking = { delta -> thinkingBatcher.appendToken(delta) },
+        onAnswer = { delta -> tokenBatcher.appendToken(delta) }
+      )
+
+      when (outcome) {
+        is RealLlmEngine.GenerateOutcome.Failure -> {
+          tokenBatcher.reset()
+          thinkingBatcher.reset()
+          withContext(Dispatchers.Main) {
+            _liveStream.value = LiveStreamState()
+            _uiState.value = _uiState.value.copy(
+              isStreaming = false,
+              statusNotice = "استنتاج بینایی ناموفق بود: " + outcome.reason
+            )
+          }
+        }
+        else -> {
+          val completed = outcome as? RealLlmEngine.GenerateOutcome.Completed
+          val cancelled = outcome as? RealLlmEngine.GenerateOutcome.Cancelled
+          val finalFullAnswer = (completed?.text ?: cancelled?.text ?: "")
+            .ifEmpty { tokenBatcher.getAccumulated() }
+          val finalThinking = (completed?.thinking ?: cancelled?.thinking ?: "")
+            .ifEmpty { thinkingBatcher.getAccumulated() }
+          val finalTps = completed?.tokensPerSecond ?: 0f
+          val wasCancelled = cancelled != null
+
+          tokenBatcher.flushNow()
+          thinkingBatcher.flushNow()
+
+          val assistantMsg = ChatMessageEntity(
+            sessionId = sessionId,
+            role = "assistant",
+            content = if (wasCancelled) finalFullAnswer + "\n\n(تولید توسط کاربر متوقف شد)" else finalFullAnswer,
+            thinkingContent = finalThinking.ifBlank { null },
+            thinkingDurationMs = completed?.promptMs ?: 0L,
+            tokensPerSecond = finalTps
+          )
+          chatDao.insertMessage(assistantMsg)
+
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(isStreaming = false)
+            _liveStream.value = LiveStreamState(tokensPerSecond = finalTps)
+          }
+        }
+      }
+    }
+  }
+
   fun executeOfflineImageGeneration(sessionId: Long, promptText: String) {
     val guardSnapshot = _uiState.value.resourceSnapshot
     if (guardSnapshot == null || !guardSnapshot.isAiExecutionAllowed) {
@@ -1285,6 +1434,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
           asrModelLabel = null,
           statusNotice = "مدل صوتی از حافظه خارج شد."
+        )
+      }
+    }
+  }
+
+  // --- Offline vision: mmproj projector through mtmd ------------------------
+
+  /**
+   * Loads a vision projector (mmproj GGUF) against the loaded text model.
+   * The projector attaches to the text model, so that model must come first;
+   * memory is preflighted with the same hardware guard as every other load.
+   */
+  fun loadVisionProjectorFromUri(uri: Uri, fileName: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      if (!llmEngine.isLoaded) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(
+            statusNotice = "ابتدا مدل متنی (GGUF) را بارگذاری کنید؛ پروژکتور بینایی به آن وصل می‌شود."
+          )
+        }
+        return@launch
+      }
+
+      val sizeBytes = queryModelSizeBytes(uri)
+      if (sizeBytes == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "اندازهٔ فایل mmproj مشخص نیست؛ بارگذاری نشد.")
+        }
+        return@launch
+      }
+      val projectorMb = ((sizeBytes + 1024L * 1024L - 1) / (1024L * 1024L))
+        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+      val preflight = resourceGuard.canSafelyLoadModel(projectorMb, 1024)
+      if (!preflight.first) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = preflight.second)
+        }
+        return@launch
+      }
+
+      val pfd = try {
+        getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+      } catch (_: Exception) {
+        null
+      }
+      if (pfd == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "باز کردن فایل پروژکتور بینایی ممکن نشد.")
+        }
+        return@launch
+      }
+
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(statusNotice = "در حال بارگذاری پروژکتور بینایی…")
+      }
+
+      val error = llmEngine.loadVisionProjectorFromFileDescriptor(pfd.detachFd())
+      withContext(Dispatchers.Main) {
+        if (error == null) {
+          _uiState.value = _uiState.value.copy(
+            visionProjectorLabel = fileName,
+            isVisionReady = llmEngine.isVisionReady(),
+            statusNotice = "پروژکتور بینایی بارگذاری شد؛ حالا می‌توانید عکس را در گفت‌وگو پیوست کنید و دربارهٔ آن بپرسید."
+          )
+        } else {
+          _uiState.value = _uiState.value.copy(
+            visionProjectorLabel = null,
+            isVisionReady = false,
+            statusNotice = "بارگذاری پروژکتور بینایی ناموفق بود: " + error
+          )
+        }
+      }
+    }
+  }
+
+  fun unloadVisionProjector() {
+    viewModelScope.launch(Dispatchers.IO) {
+      llmEngine.unloadVisionProjector()
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(
+          visionProjectorLabel = null,
+          isVisionReady = false,
+          statusNotice = "پروژکتور بینایی از حافظه خارج شد."
         )
       }
     }
