@@ -12,6 +12,7 @@ import com.example.core.asr.RealAsrEngine
 import com.example.core.llm.ConversationCompactor
 import com.example.core.llm.GenerationParams
 import com.example.core.llm.GenerationParamsStore
+import com.example.core.llm.NativeLlama
 import com.example.core.llm.NativeLlamaBackend
 import com.example.core.llm.RealLlmEngine
 import com.example.core.model.CompatibilityLevel
@@ -110,6 +111,7 @@ data class ChatUiState(
   val ragResults: List<RetrievalResult> = emptyList(),
   val isSpeakingAudio: Boolean = false,
   val ttsSpeed: Float = 1.0f,
+  val inferenceBackendLabel: String = "cpu",
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
   val isTranscribing: Boolean = false,
@@ -184,6 +186,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     observeSessions()
     observeRegistry()
     setupResourceGuard()
+    refreshInferenceBackendLabel()
   }
 
   private fun setupResourceGuard() {
@@ -242,6 +245,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           deviceTuning = tuning,
           advisorInsights = insights
         )
+      }
+    }
+  }
+
+  /**
+   * Asks ggml (through the JNI bridge) what backends this build really has.
+   * A CPU-only APK reports "cpu"; a Vulkan-enabled build reports the actual
+   * GPU device — the UI never guesses about acceleration that is not compiled in.
+   */
+  fun refreshInferenceBackendLabel() {
+    viewModelScope.launch(Dispatchers.IO) {
+      val label = try {
+        if (NativeLlama.tryLoad()) NativeLlama.nativeBackendInfo() else "cpu"
+      } catch (_: Throwable) {
+        "cpu"
+      }
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(inferenceBackendLabel = label)
       }
     }
   }

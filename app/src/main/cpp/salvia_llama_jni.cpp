@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "llama.h"
+#include "ggml-backend.h"
 
 #define LOG_TAG "SalviaLlama"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -780,6 +781,22 @@ Java_com_example_core_llm_NativeLlama_nativeGenerate(
                    : 0.0f;
 
   return to_jstring_utf8(env, out_text);
+}
+
+// Honest backend report for the UI: "cpu" on the default CPU-only build, or
+// "cpu+gpu:<device>" when this build carries a GPU (e.g. Vulkan) ggml device.
+// The UI shows this instead of implying NPU/GPU acceleration that is not there.
+JNIEXPORT jstring JNICALL
+Java_com_example_core_llm_NativeLlama_nativeBackendInfo(JNIEnv * env, jclass) {
+  std::string info = "cpu";
+  ggml_backend_dev_t gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+  if (gpu != nullptr) {
+    const char * name = ggml_backend_dev_name(gpu);
+    if (name != nullptr && name[0] != '\0') {
+      info = std::string("cpu+gpu:") + name;
+    }
+  }
+  return to_jstring_utf8(env, info);
 }
 
 } // extern "C"

@@ -165,6 +165,14 @@ fun ModelsHubScreen(
       )
     }
 
+    // Honest ggml backend report (CPU-only build -> "cpu"; Vulkan build shows
+    // the real GPU device). Never imply acceleration that is not compiled in.
+    Text(
+      text = "بک‌اند استنتاج: \${uiState.inferenceBackendLabel}",
+      color = TextTertiary,
+      fontSize = 10.5.sp
+    )
+
     // Live weight-loading progress from the native loader (mmap read).
     val loadPercent = uiState.modelLoadPercent
     if (loadPercent != null) {

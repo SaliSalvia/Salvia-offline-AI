@@ -35,6 +35,9 @@ internal object NativeLlama {
 
   external fun nativeModelInfo(): Array<String>?
 
+  /** "cpu" or "cpu+gpu:<device>" — honest report of the compiled ggml backends. */
+  external fun nativeBackendInfo(): String
+
   external fun nativeGenerate(
     roles: Array<String>,
     contents: Array<String>,

@@ -43,6 +43,15 @@ set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)
 # Static llama/ggml linked into one shared JNI library: a single .so in the APK.
 set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
 
+# Optional GPU (Vulkan) build — OFF by default. A Vulkan-enabled ggml needs the
+# NDK shaderc pieces and grows the .so considerably; the default APK stays
+# CPU-only for maximum device compatibility (Mali GPUs included). Build a
+# Vulkan variant locally with -DSALVIA_ENABLE_VULKAN=ON.
+option(SALVIA_ENABLE_VULKAN "Build ggml with the Vulkan GPU backend" OFF)
+if(SALVIA_ENABLE_VULKAN)
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/llama.cpp-build)
 # whisper.cpp detects the parent-provided `ggml` target and links it directly.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/whisper.cpp ${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp-build)
