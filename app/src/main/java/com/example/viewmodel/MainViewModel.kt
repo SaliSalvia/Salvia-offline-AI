@@ -30,6 +30,7 @@ import com.example.core.rag.RetrievalResult
 import com.example.core.router.AiRouter
 import com.example.core.router.TargetEngine
 import com.example.core.voice.AudioEngine
+import com.example.core.voice.MicRecorder
 import com.example.data.AppDatabase
 import com.example.data.ChatMessageEntity
 import com.example.data.ChatSessionEntity
@@ -110,6 +111,7 @@ data class ChatUiState(
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
   val isTranscribing: Boolean = false,
+  val isRecordingMic: Boolean = false,
   val asrModelLabel: String? = null,
   val lastTranscription: String? = null,
   val modelLoadPercent: Int? = null,
@@ -138,6 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   // Real offline speech-to-text (whisper.cpp).
   val asrEngine = RealAsrEngine(NativeAsrBackend(), pssReader = { android.os.Debug.getPss() })
   private val genParamsStore = GenerationParamsStore(prefs)
+  private val micRecorder = MicRecorder()
 
   private val _uiState = MutableStateFlow(ChatUiState())
   val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -1177,29 +1180,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return@launch
       }
 
-      when (val outcome = asrEngine.transcribe(
-        samples = decoded.samples,
-        nThreads = _uiState.value.generationParams.threads,
-        language = null,
-        translate = false
-      )) {
-        is RealAsrEngine.TranscribeOutcome.Success -> {
-          val minutes = (outcome.result.durationSeconds / 60).toInt()
-          val seconds = (outcome.result.durationSeconds % 60).toInt()
-          _uiState.update {
-            it.copy(
-              isTranscribing = false,
-              lastTranscription = outcome.result.text.ifBlank { "(متنی شناسایی نشد)" },
-              statusNotice = "رونویسی واقعی کامل شد — زبان: ${outcome.result.language} — طول صوت: ${minutes}:${seconds.toString().padStart(2, '0')}"
-            )
-          }
-        }
-        is RealAsrEngine.TranscribeOutcome.Failure -> {
-          _uiState.update {
-            it.copy(isTranscribing = false, statusNotice = "رونویسی ناموفق بود: ${outcome.reason}")
-          }
+      applyTranscribeOutcome(
+        asrEngine.transcribe(
+          samples = decoded.samples,
+          nThreads = _uiState.value.generationParams.threads,
+          language = null,
+          translate = false
+        )
+      )
+    }
+  }
+
+  /** Shared outcome handling for file-based and live-microphone transcription. */
+  private fun applyTranscribeOutcome(outcome: RealAsrEngine.TranscribeOutcome) {
+    when (outcome) {
+      is RealAsrEngine.TranscribeOutcome.Success -> {
+        val minutes = (outcome.result.durationSeconds / 60).toInt()
+        val seconds = (outcome.result.durationSeconds % 60).toInt()
+        _uiState.update {
+          it.copy(
+            isTranscribing = false,
+            lastTranscription = outcome.result.text.ifBlank { "(متنی شناسایی نشد)" },
+            statusNotice = "رونویسی واقعی کامل شد — زبان: ${outcome.result.language} — طول صوت: ${minutes}:${seconds.toString().padStart(2, '0')}"
+          )
         }
       }
+      is RealAsrEngine.TranscribeOutcome.Failure -> {
+        _uiState.update {
+          it.copy(isTranscribing = false, statusNotice = "رونویسی ناموفق بود: ${outcome.reason}")
+        }
+      }
+    }
+  }
+
+  // --- Live microphone capture → real whisper.cpp transcription -----------
+
+  /** Starts live capture. The UI must have obtained RECORD_AUDIO first. */
+  fun startMicRecording() {
+    if (micRecorder.isRecording) return
+    val started = micRecorder.start()
+    _uiState.value = _uiState.value.copy(
+      isRecordingMic = started,
+      statusNotice = if (started) {
+        "ضبط میکروفون شروع شد؛ برای پایان و رونویسی، دکمهٔ توقف ضبط را بزنید."
+      } else {
+        "شروع ضبط ممکن نشد؛ میکروفون اشغال است یا مجوز RECORD_AUDIO داده نشده است."
+      }
+    )
+  }
+
+  /** Stops live capture and runs the real Whisper transcription on the result. */
+  fun stopMicRecordingAndTranscribe() {
+    if (!micRecorder.isRecording) return
+    val samples = micRecorder.stop()
+    _uiState.value = _uiState.value.copy(isRecordingMic = false)
+    if (samples.isEmpty()) {
+      _uiState.value = _uiState.value.copy(statusNotice = "چیزی ضبط نشد یا ضبط خیلی کوتاه بود.")
+      return
+    }
+    if (!asrEngine.isLoaded) {
+      _uiState.value = _uiState.value.copy(
+        statusNotice = "ابتدا یک مدل Whisper (GGUF) را وارد کنید تا رونویسی ضبط میکروفون فعال شود."
+      )
+      return
+    }
+    viewModelScope.launch(Dispatchers.IO) {
+      _uiState.update { it.copy(isTranscribing = true, lastTranscription = null) }
+      applyTranscribeOutcome(
+        asrEngine.transcribe(
+          samples = samples,
+          nThreads = _uiState.value.generationParams.threads,
+          language = null,
+          translate = false
+        )
+      )
     }
   }
 
