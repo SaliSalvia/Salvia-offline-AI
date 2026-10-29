@@ -30,6 +30,10 @@ set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_IS_DEV   OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
+# Multimodal (vision) support: build the standalone libmtmd for mmproj projectors.
+# llama.cpp only wires tools/mtmd in when the tools/common tree is off (our
+# case), and the vendored decoders (stb) ship as regular files in its tarball.
+set(LLAMA_BUILD_MTMD     ON CACHE BOOL "" FORCE)
 # whisper.cpp: reuse the ggml targets created by llama.cpp above (no second copy).
 set(WHISPER_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -64,4 +68,4 @@ target_compile_options(salvia_llama PRIVATE -fvisibility=hidden -O2)
 target_link_options(salvia_llama PRIVATE "-Wl,--exclude-libs,ALL")
 
 find_library(log-lib log)
-target_link_libraries(salvia_llama PRIVATE llama whisper ${log-lib})
+target_link_libraries(salvia_llama PRIVATE llama whisper mtmd ${log-lib})

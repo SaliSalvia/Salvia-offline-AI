@@ -50,4 +50,26 @@ internal object NativeLlama {
     nThreads: Int,
     callback: Any?
   ): String?
+
+  // --- Vision projector (mmproj) — optional capability ---------------------
+
+  /** Loads a vision projector against the loaded text model. Consumes [fd]. */
+  external fun nativeMtmdLoadFromFd(fd: Int): String?
+
+  external fun nativeMtmdUnload()
+
+  external fun nativeMtmdIsVisionReady(): Boolean
+
+  external fun nativeGenerateVision(
+    question: String,
+    imageBytes: ByteArray,
+    maxTokens: Int,
+    temperature: Float,
+    topP: Float,
+    topK: Int,
+    repeatPenalty: Float,
+    nCtx: Int,
+    nThreads: Int,
+    callback: Any?
+  ): String?
 }

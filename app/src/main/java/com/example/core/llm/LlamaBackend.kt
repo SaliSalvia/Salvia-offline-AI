@@ -32,6 +32,21 @@ interface LlamaBackend {
 
   /** [promptTokens, promptMs, generatedTokens, generatedMs, tokensPerSec] of the last run. */
   fun lastStats(): FloatArray
+
+  // --- Vision projector (mmproj): optional capability with JVM-test-safe
+  // defaults so existing fake backends keep compiling without changes.
+
+  /** Loads a vision projector against the loaded text model. Consumes [fd]. */
+  fun loadVisionProjectorFromFd(fd: Int): String? =
+    throw UnsupportedOperationException("vision is not supported by this backend")
+
+  fun unloadVisionProjector() {}
+
+  fun isVisionReady(): Boolean = false
+
+  /** Runs one image + question turn; streams answer deltas through the request. */
+  fun generateVision(request: VisionChatRequest): NativeGenerationResult =
+    throw UnsupportedOperationException("vision is not supported by this backend")
 }
 
 fun interface LoadListener {
@@ -54,4 +69,11 @@ data class NativeChatRequest(
 data class NativeGenerationResult(
   val text: String,
   val wasCancelled: Boolean
+)
+
+data class VisionChatRequest(
+  val question: String,
+  val imageBytes: ByteArray,
+  val params: GenerationParams,
+  val onToken: TokenListener? = null
 )

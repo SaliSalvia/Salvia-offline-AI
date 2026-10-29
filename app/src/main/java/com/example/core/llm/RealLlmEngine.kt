@@ -194,4 +194,110 @@ class RealLlmEngine(
   }
 
   fun cancel() = backend.cancel()
+
+  /** True when a vision projector (mmproj) is attached to the loaded model. */
+  fun isVisionReady(): Boolean = try {
+    backend.isVisionReady()
+  } catch (_: Throwable) {
+    false
+  }
+
+  /** Loads a vision projector (mmproj GGUF) against the loaded text model. Null on success. */
+  fun loadVisionProjectorFromFileDescriptor(fd: Int): String? = try {
+    backend.loadVisionProjectorFromFd(fd)
+  } catch (t: Throwable) {
+    t.message ?: "vision projector load failed"
+  }
+
+  fun unloadVisionProjector() {
+    try {
+      backend.unloadVisionProjector()
+    } catch (_: Throwable) {
+    }
+  }
+
+  /**
+   * One image + question turn through the vision projector. Streams reasoning
+   * and answer deltas through the same ThinkingStreamParser used by [generate],
+   * and returns the same outcome sealed class for uniform error handling.
+   */
+  fun generateVision(
+    question: String,
+    imageBytes: ByteArray,
+    params: GenerationParams,
+    onThinking: (String) -> Unit = {},
+    onAnswer: (String) -> Unit = {}
+  ): GenerateOutcome {
+    if (!isLoaded) {
+      return GenerateOutcome.Failure("no model loaded")
+    }
+    if (question.isBlank()) {
+      return GenerateOutcome.Failure("empty question")
+    }
+    if (imageBytes.isEmpty()) {
+      return GenerateOutcome.Failure("empty image")
+    }
+
+    val parser = ThinkingStreamParser()
+    val fullThinking = StringBuilder()
+    val fullAnswer = StringBuilder()
+    fun dispatch(chunk: String) {
+      if (chunk.isEmpty()) return
+      val (thinking, answer) = parser.push(chunk)
+      if (thinking.isNotEmpty()) {
+        fullThinking.append(thinking)
+        onThinking(thinking)
+      }
+      if (answer.isNotEmpty()) {
+        fullAnswer.append(answer)
+        onAnswer(answer)
+      }
+    }
+
+    val result = try {
+      backend.generateVision(
+        VisionChatRequest(
+          question = question,
+          imageBytes = imageBytes,
+          params = params.sanitized(),
+          onToken = TokenListener { text -> dispatch(text) }
+        )
+      )
+    } catch (t: Throwable) {
+      return GenerateOutcome.Failure(t.message ?: "native vision generation failed")
+    }
+
+    val (tailThinking, tailAnswer) = parser.finish()
+    if (tailThinking.isNotEmpty()) {
+      fullThinking.append(tailThinking)
+      onThinking(tailThinking)
+    }
+    if (tailAnswer.isNotEmpty()) {
+      fullAnswer.append(tailAnswer)
+      onAnswer(tailAnswer)
+    }
+
+    val stats = try {
+      backend.lastStats()
+    } catch (_: Throwable) {
+      FloatArray(5)
+    }
+
+    val answerText = fullAnswer.toString()
+    val thinkingText = fullThinking.toString()
+
+    return if (result.wasCancelled) {
+      GenerateOutcome.Cancelled(answerText, thinkingText)
+    } else {
+      GenerateOutcome.Completed(
+        text = answerText,
+        thinking = thinkingText,
+        promptTokens = stats.getOrElse(0) { 0f }.toInt(),
+        promptMs = stats.getOrElse(1) { 0f }.toLong(),
+        generatedTokens = stats.getOrElse(2) { 0f }.toInt(),
+        generatedMs = stats.getOrElse(3) { 0f }.toLong(),
+        tokensPerSecond = stats.getOrElse(4) { 0f }
+      )
+    }
+  }
 }
