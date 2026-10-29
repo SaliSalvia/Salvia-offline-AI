@@ -9,6 +9,7 @@ import android.content.Context
 import com.example.core.localization.AppLanguage
 import com.example.core.asr.NativeAsrBackend
 import com.example.core.asr.RealAsrEngine
+import com.example.core.llm.ConversationCompactor
 import com.example.core.llm.GenerationParams
 import com.example.core.llm.GenerationParamsStore
 import com.example.core.llm.NativeLlamaBackend
@@ -141,6 +142,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val asrEngine = RealAsrEngine(NativeAsrBackend(), pssReader = { android.os.Debug.getPss() })
   private val genParamsStore = GenerationParamsStore(prefs)
   private val micRecorder = MicRecorder()
+
+  // Running per-session summaries produced by long-conversation compaction.
+  private val compactionSummaries = mutableMapOf<Long, String>()
 
   private val _uiState = MutableStateFlow(ChatUiState())
   val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -811,11 +815,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
+
+        // Long-conversation compaction: once the transcript outgrows a fraction of
+        // the prompt budget, fold the aged turns into a running LLM-generated
+        // summary instead of letting the history window silently drop them.
+        val promptTokenBudget = (effectiveParams.contextTokens - effectiveParams.maxTokens - 64).coerceAtLeast(32)
+        val promptCharBudget = (promptTokenBudget * 2.0f).toInt().coerceAtLeast(64)
+        val compactionPlan = ConversationCompactor.plan(
+          priorMessages = priorMessages.map { ConversationCompactor.MessageRef(it.role, it.content) },
+          currentChars = userContent.length,
+          charBudget = promptCharBudget
+        )
+        val sessionSummary = if (compactionPlan.shouldCompact) {
+          runConversationCompaction(session.id, compactionPlan.aged)
+        } else {
+          compactionSummaries[session.id]
+        }
+
         val history = buildChatHistory(
           priorMessages = priorMessages,
           userContent = userContent,
           contextTokens = effectiveParams.contextTokens,
-          maxTokens = effectiveParams.maxTokens
+          maxTokens = effectiveParams.maxTokens,
+          summaryText = sessionSummary,
+          maxTurns = if (compactionPlan.shouldCompact) ConversationCompactor.DEFAULT_KEEP_LAST_TURNS else 12
         )
 
         val outcome = llmEngine.generate(
@@ -923,7 +946,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     priorMessages: List<ChatMessageEntity>,
     userContent: String,
     contextTokens: Int,
-    maxTokens: Int
+    maxTokens: Int,
+    summaryText: String? = null,
+    maxTurns: Int = 12
   ): List<RealLlmEngine.ChatTurn> {
     val promptTokenBudget = (contextTokens - maxTokens - 64).coerceAtLeast(32)
     val charBudget = (promptTokenBudget * 2.0f).toInt().coerceAtLeast(64)
@@ -937,7 +962,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     turns.addLast(RealLlmEngine.ChatTurn("user", latest))
     usedChars += latest.length + 16
 
-    for (m in priorMessages.takeLast(12).asReversed()) {
+    // Compacted memory of aged turns sits before the verbatim window.
+    summaryText?.takeIf { it.isNotBlank() }?.let { s ->
+      val clipped = s.take((charBudget * 0.25f).toInt().coerceAtLeast(256))
+      turns.addFirst(RealLlmEngine.ChatTurn("system", "خلاصهٔ گفت‌وگوی قدیمی‌تر این نشست:\n$clipped"))
+      usedChars += clipped.length + 16
+    }
+
+    for (m in priorMessages.takeLast(maxTurns).asReversed()) {
       if (m.role != "user" && m.role != "assistant") continue
       val remaining = charBudget - usedChars - 16
       if (remaining < 64) break
@@ -948,6 +980,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     return turns.toList()
+  }
+
+  /**
+   * Folds aged turns into the running session summary via the local LLM. On
+   * failure the previous summary is kept and the send continues — an honest
+   * fallback, and never worse than the silent drop that used to happen.
+   */
+  private suspend fun runConversationCompaction(
+    sessionId: Long,
+    aged: List<ConversationCompactor.MessageRef>
+  ): String? {
+    val previous = compactionSummaries[sessionId]
+    val prompt = ConversationCompactor.buildSummaryPrompt(aged, previous)
+    val baseParams = _uiState.value.generationParams
+    val params = baseParams.copy(
+      maxTokens = 256.coerceAtMost(baseParams.maxTokens),
+      temperature = 0.3f
+    ).sanitized()
+
+    val summaryBuilder = StringBuilder()
+    val outcome = llmEngine.generate(
+      history = listOf(RealLlmEngine.ChatTurn("user", prompt)),
+      params = params,
+      onThinking = { },
+      onAnswer = { delta -> summaryBuilder.append(delta) }
+    )
+    val summary = (outcome as? RealLlmEngine.GenerateOutcome.Completed)?.text
+      ?.takeIf { it.isNotBlank() }
+    return if (summary != null) {
+      compactionSummaries[sessionId] = summary
+      withContext(Dispatchers.Main) {
+        _uiState.update {
+          it.copy(statusNotice = "گفت‌وگوی طولانی جمع‌بندی شد (${aged.size} پیام قدیمی در خلاصهٔ نشست ادغام شد).")
+        }
+      }
+      summary
+    } else {
+      previous
+    }
   }
 
   fun executeOfflineImageGeneration(sessionId: Long, promptText: String) {
