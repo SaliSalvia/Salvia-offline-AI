@@ -12,14 +12,17 @@ import java.util.Locale
  * whisper.cpp pipeline in [com.example.core.asr.RealAsrEngine] — there is no
  * simulated transcription anywhere in this app.
  *
- * Every [speakText] call reports its [onFinished] callback exactly once,
- * whether the engine spoke to the end, was stopped, failed, or was never
- * ready at all — the UI must never be left in an eternal "speaking" state.
+ * Long texts are split with [chunkTextForSpeech] and enqueued, because several
+ * system TTS engines silently truncate or fail on very long single
+ * utterances. Every [speak] call reports its completion exactly once — spoke
+ * to the end, was stopped, failed, or was never ready at all — so the UI must
+ * never be left in an eternal "speaking" state.
  */
-class AudioEngine(private val context: Context) {
+class AudioEngine(private val context: Context) : TtsEngine {
   private var tts: TextToSpeech? = null
   private var isTtsInitialized = false
   private var pendingOnFinished: (() -> Unit)? = null
+  private var lastChunkId: String? = null
   private val mainHandler = Handler(Looper.getMainLooper())
 
   init {
@@ -33,45 +36,68 @@ class AudioEngine(private val context: Context) {
       override fun onStart(utteranceId: String?) {}
 
       override fun onDone(utteranceId: String?) {
-        if (utteranceId == UTTERANCE_ID) {
+        // Only the last queued chunk completes the request; intermediate
+        // chunks just hand over to the next one in the queue.
+        if (utteranceId == lastChunkId) {
           notifyFinished()
         }
       }
 
       @Deprecated("Deprecated in Java")
       override fun onError(utteranceId: String?) {
-        if (utteranceId == UTTERANCE_ID) {
-          notifyFinished()
-        }
+        // Any failing chunk aborts the whole queue — report completion.
+        tts?.stop()
+        notifyFinished()
       }
     })
   }
 
-  fun speakText(text: String, onFinished: (() -> Unit)? = null) {
+  override fun speak(text: String, onFinished: (() -> Unit)?) {
     pendingOnFinished = onFinished
-    if (isTtsInitialized && tts != null) {
-      tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
-    } else {
+    val engine = tts
+    if (!isTtsInitialized || engine == null) {
       // No system TTS engine installed (or still initializing): report
-      // completion immediately instead of playing a mystery beep while the
-      // UI waits forever for a callback that would never arrive.
+      // completion immediately instead of leaving the UI waiting forever.
       notifyFinished()
+      return
+    }
+    engine.stop()
+    val chunks = chunkTextForSpeech(text)
+    if (chunks.isEmpty()) {
+      notifyFinished()
+      return
+    }
+    lastChunkId = CHUNK_ID_PREFIX + (chunks.size - 1)
+    chunks.forEachIndexed { index, chunk ->
+      engine.speak(chunk, TextToSpeech.QUEUE_ADD, null, CHUNK_ID_PREFIX + index)
     }
   }
 
-  fun stopSpeech() {
+  override fun stop() {
     tts?.stop()
     notifyFinished()
   }
+
+  override fun setSpeechRate(rate: Float) {
+    tts?.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
+  }
+
+  override val isReady: Boolean
+    get() = isTtsInitialized && tts != null
+
+  /** Compatibility aliases so existing call sites keep working. */
+  fun speakText(text: String, onFinished: (() -> Unit)? = null) = speak(text, onFinished)
+  fun stopSpeech() = stop()
 
   /** Runs the stored completion once on the main thread; later calls are no-ops. */
   private fun notifyFinished() {
     val callback = pendingOnFinished
     pendingOnFinished = null
+    lastChunkId = null
     callback?.let { mainHandler.post(it) }
   }
 
   private companion object {
-    const val UTTERANCE_ID = "DEEP_GGUF_TTS"
+    const val CHUNK_ID_PREFIX = "DEEP_GGUF_TTS_"
   }
 }

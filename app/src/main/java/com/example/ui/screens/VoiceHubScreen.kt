@@ -37,6 +37,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -207,6 +209,28 @@ fun VoiceHubScreen(
             Text("توقف", color = BackgroundPitchBlack, fontSize = 13.sp)
           }
         }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Text(
+          text = "سرعت گفتار: " + "%.1f".format(uiState.ttsSpeed) + "\u00d7",
+          color = TextSecondary,
+          fontSize = 11.sp
+        )
+        Slider(
+          value = uiState.ttsSpeed,
+          onValueChange = { viewModel.setTtsSpeed(it) },
+          valueRange = 0.6f..1.4f,
+          steps = 7,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("tts_speed_slider"),
+          colors = SliderDefaults.colors(
+            thumbColor = NeonPinkPrimary,
+            activeTrackColor = NeonPinkPrimary,
+            inactiveTrackColor = SurfaceCardBorder
+          )
+        )
       }
     }
 

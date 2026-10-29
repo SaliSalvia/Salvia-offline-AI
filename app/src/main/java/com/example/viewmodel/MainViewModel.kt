@@ -109,6 +109,7 @@ data class ChatUiState(
   val ragSummary: RagIndexSummary = RagIndexSummary(0, 0, emptyList()),
   val ragResults: List<RetrievalResult> = emptyList(),
   val isSpeakingAudio: Boolean = false,
+  val ttsSpeed: Float = 1.0f,
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
   val isTranscribing: Boolean = false,
@@ -170,11 +171,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   init {
     val savedLang = prefs.getString("app_language", "FA") ?: "FA"
     val initialLang = if (savedLang == "EN") AppLanguage.EN else AppLanguage.FA
+    val savedTtsSpeed = prefs.getFloat("tts_speed", 1.0f).coerceIn(0.6f, 1.4f)
     val initialParams = genParamsStore.load()
     _uiState.value = _uiState.value.copy(
       appLanguage = initialLang,
       generationParams = initialParams,
-      activeContextTokens = initialParams.contextTokens
+      activeContextTokens = initialParams.contextTokens,
+      ttsSpeed = savedTtsSpeed
     )
 
     loadHardwareTelemetry()
@@ -481,6 +484,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun speakMessageText(text: String) {
     _uiState.value = _uiState.value.copy(isSpeakingAudio = true)
+    // Apply the persisted speech speed before every utterance so the slider
+    // takes effect immediately, not only after a restart.
+    audioEngine.setSpeechRate(_uiState.value.ttsSpeed)
     audioEngine.speakText(text) {
       // Posted on the main looper by AudioEngine once speech really ends,
       // fails, or is stopped — the button state can never get stuck again.
@@ -1151,6 +1157,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun setLanguage(lang: AppLanguage) {
     prefs.edit().putString("app_language", lang.name).apply()
     _uiState.value = _uiState.value.copy(appLanguage = lang)
+  }
+
+  /** Persists and applies the TTS speech speed (0.6x\u20131.4x). */
+  fun setTtsSpeed(speed: Float) {
+    val clamped = speed.coerceIn(0.6f, 1.4f)
+    prefs.edit().putFloat("tts_speed", clamped).apply()
+    audioEngine.setSpeechRate(clamped)
+    _uiState.value = _uiState.value.copy(ttsSpeed = clamped)
   }
 
   // --- Generation parameters (persisted, hardware-safe ranges) --------------
