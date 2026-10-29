@@ -3,14 +3,17 @@ package com.example.viewmodel
 import android.app.Application
 import android.net.Uri
 import android.provider.OpenableColumns
+import java.io.ByteArrayOutputStream
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
 import com.example.core.localization.AppLanguage
 import com.example.core.asr.NativeAsrBackend
 import com.example.core.asr.RealAsrEngine
+import com.example.core.llm.ConversationCompactor
 import com.example.core.llm.GenerationParams
 import com.example.core.llm.GenerationParamsStore
+import com.example.core.llm.NativeLlama
 import com.example.core.llm.NativeLlamaBackend
 import com.example.core.llm.RealLlmEngine
 import com.example.core.model.CompatibilityLevel
@@ -30,6 +33,7 @@ import com.example.core.rag.RetrievalResult
 import com.example.core.router.AiRouter
 import com.example.core.router.TargetEngine
 import com.example.core.voice.AudioEngine
+import com.example.core.voice.MicRecorder
 import com.example.data.AppDatabase
 import com.example.data.ChatMessageEntity
 import com.example.data.ChatSessionEntity
@@ -107,9 +111,14 @@ data class ChatUiState(
   val ragSummary: RagIndexSummary = RagIndexSummary(0, 0, emptyList()),
   val ragResults: List<RetrievalResult> = emptyList(),
   val isSpeakingAudio: Boolean = false,
+  val ttsSpeed: Float = 1.0f,
+  val inferenceBackendLabel: String = "cpu",
+  val visionProjectorLabel: String? = null,
+  val isVisionReady: Boolean = false,
   val airplaneModeTestEnabled: Boolean = false,
   val userModeLevel: String = "BALANCED", // SIMPLE, BALANCED, ADVANCED
   val isTranscribing: Boolean = false,
+  val isRecordingMic: Boolean = false,
   val asrModelLabel: String? = null,
   val lastTranscription: String? = null,
   val modelLoadPercent: Int? = null,
@@ -138,6 +147,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   // Real offline speech-to-text (whisper.cpp).
   val asrEngine = RealAsrEngine(NativeAsrBackend(), pssReader = { android.os.Debug.getPss() })
   private val genParamsStore = GenerationParamsStore(prefs)
+  private val micRecorder = MicRecorder()
+
+  // Running per-session summaries produced by long-conversation compaction.
+  private val compactionSummaries = mutableMapOf<Long, String>()
 
   private val _uiState = MutableStateFlow(ChatUiState())
   val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -163,17 +176,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   init {
     val savedLang = prefs.getString("app_language", "FA") ?: "FA"
     val initialLang = if (savedLang == "EN") AppLanguage.EN else AppLanguage.FA
+    val savedTtsSpeed = prefs.getFloat("tts_speed", 1.0f).coerceIn(0.6f, 1.4f)
     val initialParams = genParamsStore.load()
     _uiState.value = _uiState.value.copy(
       appLanguage = initialLang,
       generationParams = initialParams,
-      activeContextTokens = initialParams.contextTokens
+      activeContextTokens = initialParams.contextTokens,
+      ttsSpeed = savedTtsSpeed
     )
 
     loadHardwareTelemetry()
     observeSessions()
     observeRegistry()
     setupResourceGuard()
+    refreshInferenceBackendLabel()
   }
 
   private fun setupResourceGuard() {
@@ -232,6 +248,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           deviceTuning = tuning,
           advisorInsights = insights
         )
+      }
+    }
+  }
+
+  /**
+   * Asks ggml (through the JNI bridge) what backends this build really has.
+   * A CPU-only APK reports "cpu"; a Vulkan-enabled build reports the actual
+   * GPU device — the UI never guesses about acceleration that is not compiled in.
+   */
+  fun refreshInferenceBackendLabel() {
+    viewModelScope.launch(Dispatchers.IO) {
+      val label = try {
+        if (NativeLlama.tryLoad()) NativeLlama.nativeBackendInfo() else "cpu"
+      } catch (_: Throwable) {
+        "cpu"
+      }
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(inferenceBackendLabel = label)
       }
     }
   }
@@ -421,6 +455,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     _uiState.value = _uiState.value.copy(statusNotice = null, routerNotice = null)
   }
 
+  /**
+   * Exports the current session transcript as Markdown (roles as headers, thinking
+   * as a blockquote) so the user can archive or share the whole conversation.
+   */
+  fun exportSessionAsMarkdown(): String {
+    val session = _uiState.value.currentSession
+    val messages = _uiState.value.messages
+    val sb = StringBuilder()
+    sb.append("# ").append(session?.title ?: "گفت‌وگو").append('\n').append('\n')
+    if (messages.isEmpty()) {
+      sb.append("(این گفت‌وگو خالی است)").append('\n').append('\n')
+    }
+    for (msg in messages) {
+      when (msg.role) {
+        "user" -> sb.append("## 🧑 کاربر").append('\n').append('\n').append(msg.content).append('\n').append('\n')
+        "assistant" -> {
+          sb.append("## 🤖 دستیار").append('\n').append('\n')
+          msg.thinkingContent?.takeIf { it.isNotBlank() }?.let {
+            sb.append("> 💭 استدلال مدل:").append('\n').append("> ")
+              .append(it.replace("\n", "\n> ")).append('\n').append('\n')
+          }
+          sb.append(msg.content).append('\n').append('\n')
+          msg.imageResultUri?.takeIf { it.isNotBlank() }?.let {
+            sb.append("(تصویر تولیدشده در مسیر: ").append(it).append(")").append('\n').append('\n')
+          }
+        }
+        else -> sb.append("### ").append(msg.role).append('\n').append('\n').append(msg.content).append('\n').append('\n')
+      }
+    }
+    sb.append("---").append('\n').append("_Sali-Localo — استنتاج آفلاین روی دستگاه_").append('\n')
+    return sb.toString()
+  }
+
   fun executeRagQuery(query: String) {
     viewModelScope.launch(Dispatchers.IO) {
       val results = ragEngine.retrieve(query)
@@ -441,6 +508,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun speakMessageText(text: String) {
     _uiState.value = _uiState.value.copy(isSpeakingAudio = true)
+    // Apply the persisted speech speed before every utterance so the slider
+    // takes effect immediately, not only after a restart.
+    audioEngine.setSpeechRate(_uiState.value.ttsSpeed)
     audioEngine.speakText(text) {
       // Posted on the main looper by AudioEngine once speech really ends,
       // fails, or is stopped — the button state can never get stuck again.
@@ -496,6 +566,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       withContext(Dispatchers.Main) {
         _uiState.value = _uiState.value.copy(
           textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+          visionProjectorLabel = null,
+          isVisionReady = false,
           statusNotice = "مدل از حافظه خارج شد و منابع آزاد شدند."
         )
       }
@@ -643,6 +715,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = slot,
+              visionProjectorLabel = null,
+              isVisionReady = false,
               activeContextTokens = effectiveContext,
               generationParams = updatedParams,
               modelLoadPercent = null,
@@ -655,6 +729,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           withContext(Dispatchers.Main) {
             _uiState.value = _uiState.value.copy(
               textSlotModel = GgufInferenceEngine.DEFAULT_TEXT_SLOT,
+              visionProjectorLabel = null,
+              isVisionReady = false,
               modelLoadPercent = null,
               statusNotice = "بارگذاری مدل ناموفق بود: ${outcome.reason}"
             )
@@ -748,6 +824,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val routed = AiRouter.routeRequest(trimmed, stagedFiles)
     _uiState.value = _uiState.value.copy(routerNotice = routed.explanationFa)
 
+    // Vision path: an attached image with a loaded mmproj projector goes to
+    // real multimodal inference (mtmd), not to a text summary of the file.
+    val attachedImage = stagedFiles.firstOrNull { it.category == com.example.files.FileCategory.IMAGE }
+    if (attachedImage != null) {
+      if (_uiState.value.isVisionReady) {
+        activeGenerationJob?.cancel()
+        executeVisionGeneration(session.id, trimmed.ifBlank { "این تصویر را توصیف کن." }, attachedImage)
+        return
+      }
+      _uiState.value = _uiState.value.copy(
+        statusNotice = "برای تحلیل واقعی تصویر، ابتدا مدل متنی و سپس پروژکتور بینایی (mmproj) را از بخش «مدل‌ها» بارگذاری کنید."
+      )
+      return
+    }
+
     if (routed.engine == TargetEngine.DIFFUSION_IMAGE) {
       activeGenerationJob?.cancel()
       executeOfflineImageGeneration(session.id, routed.sanitizedPrompt)
@@ -784,7 +875,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val priorMessages = _uiState.value.messages.dropLast(1)
 
     viewModelScope.launch(Dispatchers.IO) {
-      val ragHits = ragEngine.retrieve(trimmed, topK = 3).filter { it.similarityScore >= 0.15f }
+      // BM25 scores are corpus-relative and unbounded (unlike the old cosine), so a fixed
+      // cutoff is meaningless. Keep hits meaningfully close to the best hit instead.
+      val retrievedHits = ragEngine.retrieve(trimmed, topK = 3)
+      val bestHitScore = retrievedHits.maxOfOrNull { it.similarityScore } ?: 0f
+      val ragHits = retrievedHits.filter { it.similarityScore > 0f && it.similarityScore >= 0.35f * bestHitScore }
       val userContent = buildUserContentWithAttachments(trimmed, stagedFiles, ragHits)
       chatDao.insertMessage(userMsg)
 
@@ -804,11 +899,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
+
+        // Long-conversation compaction: once the transcript outgrows a fraction of
+        // the prompt budget, fold the aged turns into a running LLM-generated
+        // summary instead of letting the history window silently drop them.
+        val promptTokenBudget = (effectiveParams.contextTokens - effectiveParams.maxTokens - 64).coerceAtLeast(32)
+        val promptCharBudget = (promptTokenBudget * 2.0f).toInt().coerceAtLeast(64)
+        val compactionPlan = ConversationCompactor.plan(
+          priorMessages = priorMessages.map { ConversationCompactor.MessageRef(it.role, it.content) },
+          currentChars = userContent.length,
+          charBudget = promptCharBudget
+        )
+        val sessionSummary = if (compactionPlan.shouldCompact) {
+          runConversationCompaction(session.id, compactionPlan.aged)
+        } else {
+          compactionSummaries[session.id]
+        }
+
         val history = buildChatHistory(
           priorMessages = priorMessages,
           userContent = userContent,
           contextTokens = effectiveParams.contextTokens,
-          maxTokens = effectiveParams.maxTokens
+          maxTokens = effectiveParams.maxTokens,
+          summaryText = sessionSummary,
+          maxTurns = if (compactionPlan.shouldCompact) ConversationCompactor.DEFAULT_KEEP_LAST_TURNS else 12
         )
 
         val outcome = llmEngine.generate(
@@ -916,7 +1030,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     priorMessages: List<ChatMessageEntity>,
     userContent: String,
     contextTokens: Int,
-    maxTokens: Int
+    maxTokens: Int,
+    summaryText: String? = null,
+    maxTurns: Int = 12
   ): List<RealLlmEngine.ChatTurn> {
     val promptTokenBudget = (contextTokens - maxTokens - 64).coerceAtLeast(32)
     val charBudget = (promptTokenBudget * 2.0f).toInt().coerceAtLeast(64)
@@ -930,7 +1046,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     turns.addLast(RealLlmEngine.ChatTurn("user", latest))
     usedChars += latest.length + 16
 
-    for (m in priorMessages.takeLast(12).asReversed()) {
+    // Compacted memory of aged turns sits before the verbatim window.
+    summaryText?.takeIf { it.isNotBlank() }?.let { s ->
+      val clipped = s.take((charBudget * 0.25f).toInt().coerceAtLeast(256))
+      turns.addFirst(RealLlmEngine.ChatTurn("system", "خلاصهٔ گفت‌وگوی قدیمی‌تر این نشست:\n$clipped"))
+      usedChars += clipped.length + 16
+    }
+
+    for (m in priorMessages.takeLast(maxTurns).asReversed()) {
       if (m.role != "user" && m.role != "assistant") continue
       val remaining = charBudget - usedChars - 16
       if (remaining < 64) break
@@ -941,6 +1064,170 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     return turns.toList()
+  }
+
+  /**
+   * Folds aged turns into the running session summary via the local LLM. On
+   * failure the previous summary is kept and the send continues — an honest
+   * fallback, and never worse than the silent drop that used to happen.
+   */
+  private suspend fun runConversationCompaction(
+    sessionId: Long,
+    aged: List<ConversationCompactor.MessageRef>
+  ): String? {
+    val previous = compactionSummaries[sessionId]
+    val prompt = ConversationCompactor.buildSummaryPrompt(aged, previous)
+    val baseParams = _uiState.value.generationParams
+    val params = baseParams.copy(
+      maxTokens = 256.coerceAtMost(baseParams.maxTokens),
+      temperature = 0.3f
+    ).sanitized()
+
+    val summaryBuilder = StringBuilder()
+    val outcome = llmEngine.generate(
+      history = listOf(RealLlmEngine.ChatTurn("user", prompt)),
+      params = params,
+      onThinking = { },
+      onAnswer = { delta -> summaryBuilder.append(delta) }
+    )
+    val summary = (outcome as? RealLlmEngine.GenerateOutcome.Completed)?.text
+      ?.takeIf { it.isNotBlank() }
+    return if (summary != null) {
+      compactionSummaries[sessionId] = summary
+      withContext(Dispatchers.Main) {
+        _uiState.update {
+          it.copy(statusNotice = "گفت‌وگوی طولانی جمع‌بندی شد (${aged.size} پیام قدیمی در خلاصهٔ نشست ادغام شد).")
+        }
+      }
+      summary
+    } else {
+      previous
+    }
+  }
+
+  /**
+   * Real multimodal turn: the attached image is decoded and evaluated through
+   * the loaded mmproj projector (mtmd) against the text model, streaming the
+   * answer exactly like a text turn. KV reuse is disabled natively for vision.
+   */
+  private fun executeVisionGeneration(sessionId: Long, question: String, image: AttachedFile) {
+    val guardSnapshot = _uiState.value.resourceSnapshot
+    if (guardSnapshot == null || !guardSnapshot.isAiExecutionAllowed) {
+      _uiState.update {
+        it.copy(
+          statusNotice = "اجرای AI متوقف است: " +
+            (guardSnapshot?.activeConstraintReason ?: "پایش اولیهٔ منابع هنوز آماده نیست.")
+        )
+      }
+      return
+    }
+
+    val userMsg = ChatMessageEntity(
+      sessionId = sessionId,
+      role = "user",
+      content = "🖼️ [تحلیل بینایی آفلاین]: " + question,
+      attachmentsJson = "IMAGE:" + image.fileName + ":" + image.sizeFormatted
+    )
+    _uiState.value = _uiState.value.copy(
+      messages = _uiState.value.messages + userMsg,
+      attachedFiles = emptyList(),
+      isStreaming = true
+    )
+    tokenBatcher.reset()
+    thinkingBatcher.reset()
+    _liveStream.value = LiveStreamState()
+
+    activeGenerationJob?.cancel()
+    activeGenerationJob = viewModelScope.launch(Dispatchers.IO) {
+      chatDao.insertMessage(userMsg)
+
+      // Read the image bytes straight from the content URI (capped at 12 MB).
+      val imageBytes = try {
+        val capped = 12L * 1024L * 1024L
+        getApplication<Application>().contentResolver.openInputStream(Uri.parse(image.uri))?.use { stream ->
+          val buffer = ByteArrayOutputStream()
+          val chunk = ByteArray(64 * 1024)
+          var readTotal = 0L
+          while (readTotal < capped) {
+            val n = stream.read(chunk, 0, minOf(chunk.size, (capped - readTotal).toInt()))
+            if (n <= 0) break
+            buffer.write(chunk, 0, n)
+            readTotal += n
+          }
+          buffer.toByteArray()
+        }
+      } catch (_: Exception) {
+        null
+      }
+      if (imageBytes == null || imageBytes.isEmpty()) {
+        withContext(Dispatchers.Main) {
+          tokenBatcher.reset()
+          thinkingBatcher.reset()
+          _liveStream.value = LiveStreamState()
+          _uiState.value = _uiState.value.copy(
+            isStreaming = false,
+            statusNotice = "خواندن فایل تصویر ممکن نشد."
+          )
+        }
+        return@launch
+      }
+
+      XiaomiOptimizer.applyThreadPriority(_uiState.value.performanceMode)
+
+      val params = _uiState.value.generationParams
+        .copy(contextTokens = _uiState.value.activeContextTokens)
+        .sanitized()
+
+      val outcome = llmEngine.generateVision(
+        question = question,
+        imageBytes = imageBytes,
+        params = params,
+        onThinking = { delta -> thinkingBatcher.appendToken(delta) },
+        onAnswer = { delta -> tokenBatcher.appendToken(delta) }
+      )
+
+      when (outcome) {
+        is RealLlmEngine.GenerateOutcome.Failure -> {
+          tokenBatcher.reset()
+          thinkingBatcher.reset()
+          withContext(Dispatchers.Main) {
+            _liveStream.value = LiveStreamState()
+            _uiState.value = _uiState.value.copy(
+              isStreaming = false,
+              statusNotice = "استنتاج بینایی ناموفق بود: " + outcome.reason
+            )
+          }
+        }
+        else -> {
+          val completed = outcome as? RealLlmEngine.GenerateOutcome.Completed
+          val cancelled = outcome as? RealLlmEngine.GenerateOutcome.Cancelled
+          val finalFullAnswer = (completed?.text ?: cancelled?.text ?: "")
+            .ifEmpty { tokenBatcher.getAccumulated() }
+          val finalThinking = (completed?.thinking ?: cancelled?.thinking ?: "")
+            .ifEmpty { thinkingBatcher.getAccumulated() }
+          val finalTps = completed?.tokensPerSecond ?: 0f
+          val wasCancelled = cancelled != null
+
+          tokenBatcher.flushNow()
+          thinkingBatcher.flushNow()
+
+          val assistantMsg = ChatMessageEntity(
+            sessionId = sessionId,
+            role = "assistant",
+            content = if (wasCancelled) finalFullAnswer + "\n\n(تولید توسط کاربر متوقف شد)" else finalFullAnswer,
+            thinkingContent = finalThinking.ifBlank { null },
+            thinkingDurationMs = completed?.promptMs ?: 0L,
+            tokensPerSecond = finalTps
+          )
+          chatDao.insertMessage(assistantMsg)
+
+          withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(isStreaming = false)
+            _liveStream.value = LiveStreamState(tokensPerSecond = finalTps)
+          }
+        }
+      }
+    }
   }
 
   fun executeOfflineImageGeneration(sessionId: Long, promptText: String) {
@@ -1040,6 +1327,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun setLanguage(lang: AppLanguage) {
     prefs.edit().putString("app_language", lang.name).apply()
     _uiState.value = _uiState.value.copy(appLanguage = lang)
+  }
+
+  /** Persists and applies the TTS speech speed (0.6x\u20131.4x). */
+  fun setTtsSpeed(speed: Float) {
+    val clamped = speed.coerceIn(0.6f, 1.4f)
+    prefs.edit().putFloat("tts_speed", clamped).apply()
+    audioEngine.setSpeechRate(clamped)
+    _uiState.value = _uiState.value.copy(ttsSpeed = clamped)
   }
 
   // --- Generation parameters (persisted, hardware-safe ranges) --------------
@@ -1144,6 +1439,89 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  // --- Offline vision: mmproj projector through mtmd ------------------------
+
+  /**
+   * Loads a vision projector (mmproj GGUF) against the loaded text model.
+   * The projector attaches to the text model, so that model must come first;
+   * memory is preflighted with the same hardware guard as every other load.
+   */
+  fun loadVisionProjectorFromUri(uri: Uri, fileName: String) {
+    viewModelScope.launch(Dispatchers.IO) {
+      if (!llmEngine.isLoaded) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(
+            statusNotice = "ابتدا مدل متنی (GGUF) را بارگذاری کنید؛ پروژکتور بینایی به آن وصل می‌شود."
+          )
+        }
+        return@launch
+      }
+
+      val sizeBytes = queryModelSizeBytes(uri)
+      if (sizeBytes == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "اندازهٔ فایل mmproj مشخص نیست؛ بارگذاری نشد.")
+        }
+        return@launch
+      }
+      val projectorMb = ((sizeBytes + 1024L * 1024L - 1) / (1024L * 1024L))
+        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+      val preflight = resourceGuard.canSafelyLoadModel(projectorMb, 1024)
+      if (!preflight.first) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = preflight.second)
+        }
+        return@launch
+      }
+
+      val pfd = try {
+        getApplication<Application>().contentResolver.openFileDescriptor(uri, "r")
+      } catch (_: Exception) {
+        null
+      }
+      if (pfd == null) {
+        withContext(Dispatchers.Main) {
+          _uiState.value = _uiState.value.copy(statusNotice = "باز کردن فایل پروژکتور بینایی ممکن نشد.")
+        }
+        return@launch
+      }
+
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(statusNotice = "در حال بارگذاری پروژکتور بینایی…")
+      }
+
+      val error = llmEngine.loadVisionProjectorFromFileDescriptor(pfd.detachFd())
+      withContext(Dispatchers.Main) {
+        if (error == null) {
+          _uiState.value = _uiState.value.copy(
+            visionProjectorLabel = fileName,
+            isVisionReady = llmEngine.isVisionReady(),
+            statusNotice = "پروژکتور بینایی بارگذاری شد؛ حالا می‌توانید عکس را در گفت‌وگو پیوست کنید و دربارهٔ آن بپرسید."
+          )
+        } else {
+          _uiState.value = _uiState.value.copy(
+            visionProjectorLabel = null,
+            isVisionReady = false,
+            statusNotice = "بارگذاری پروژکتور بینایی ناموفق بود: " + error
+          )
+        }
+      }
+    }
+  }
+
+  fun unloadVisionProjector() {
+    viewModelScope.launch(Dispatchers.IO) {
+      llmEngine.unloadVisionProjector()
+      withContext(Dispatchers.Main) {
+        _uiState.value = _uiState.value.copy(
+          visionProjectorLabel = null,
+          isVisionReady = false,
+          statusNotice = "پروژکتور بینایی از حافظه خارج شد."
+        )
+      }
+    }
+  }
+
   /**
    * Asks an in-flight Whisper transcription to stop; the running job then
    * fails honestly as "transcription cancelled" and the UI state resets.
@@ -1173,29 +1551,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return@launch
       }
 
-      when (val outcome = asrEngine.transcribe(
-        samples = decoded.samples,
-        nThreads = _uiState.value.generationParams.threads,
-        language = null,
-        translate = false
-      )) {
-        is RealAsrEngine.TranscribeOutcome.Success -> {
-          val minutes = (outcome.result.durationSeconds / 60).toInt()
-          val seconds = (outcome.result.durationSeconds % 60).toInt()
-          _uiState.update {
-            it.copy(
-              isTranscribing = false,
-              lastTranscription = outcome.result.text.ifBlank { "(متنی شناسایی نشد)" },
-              statusNotice = "رونویسی واقعی کامل شد — زبان: ${outcome.result.language} — طول صوت: ${minutes}:${seconds.toString().padStart(2, '0')}"
-            )
-          }
-        }
-        is RealAsrEngine.TranscribeOutcome.Failure -> {
-          _uiState.update {
-            it.copy(isTranscribing = false, statusNotice = "رونویسی ناموفق بود: ${outcome.reason}")
-          }
+      applyTranscribeOutcome(
+        asrEngine.transcribe(
+          samples = decoded.samples,
+          nThreads = _uiState.value.generationParams.threads,
+          language = null,
+          translate = false
+        )
+      )
+    }
+  }
+
+  /** Shared outcome handling for file-based and live-microphone transcription. */
+  private fun applyTranscribeOutcome(outcome: RealAsrEngine.TranscribeOutcome) {
+    when (outcome) {
+      is RealAsrEngine.TranscribeOutcome.Success -> {
+        val minutes = (outcome.result.durationSeconds / 60).toInt()
+        val seconds = (outcome.result.durationSeconds % 60).toInt()
+        _uiState.update {
+          it.copy(
+            isTranscribing = false,
+            lastTranscription = outcome.result.text.ifBlank { "(متنی شناسایی نشد)" },
+            statusNotice = "رونویسی واقعی کامل شد — زبان: ${outcome.result.language} — طول صوت: ${minutes}:${seconds.toString().padStart(2, '0')}"
+          )
         }
       }
+      is RealAsrEngine.TranscribeOutcome.Failure -> {
+        _uiState.update {
+          it.copy(isTranscribing = false, statusNotice = "رونویسی ناموفق بود: ${outcome.reason}")
+        }
+      }
+    }
+  }
+
+  // --- Live microphone capture → real whisper.cpp transcription -----------
+
+  /** Starts live capture. The UI must have obtained RECORD_AUDIO first. */
+  fun startMicRecording() {
+    if (micRecorder.isRecording) return
+    val started = micRecorder.start()
+    _uiState.value = _uiState.value.copy(
+      isRecordingMic = started,
+      statusNotice = if (started) {
+        "ضبط میکروفون شروع شد؛ برای پایان و رونویسی، دکمهٔ توقف ضبط را بزنید."
+      } else {
+        "شروع ضبط ممکن نشد؛ میکروفون اشغال است یا مجوز RECORD_AUDIO داده نشده است."
+      }
+    )
+  }
+
+  /** Stops live capture and runs the real Whisper transcription on the result. */
+  fun stopMicRecordingAndTranscribe() {
+    if (!micRecorder.isRecording) return
+    val samples = micRecorder.stop()
+    _uiState.value = _uiState.value.copy(isRecordingMic = false)
+    if (samples.isEmpty()) {
+      _uiState.value = _uiState.value.copy(statusNotice = "چیزی ضبط نشد یا ضبط خیلی کوتاه بود.")
+      return
+    }
+    if (!asrEngine.isLoaded) {
+      _uiState.value = _uiState.value.copy(
+        statusNotice = "ابتدا یک مدل Whisper (GGUF) را وارد کنید تا رونویسی ضبط میکروفون فعال شود."
+      )
+      return
+    }
+    viewModelScope.launch(Dispatchers.IO) {
+      _uiState.update { it.copy(isTranscribing = true, lastTranscription = null) }
+      applyTranscribeOutcome(
+        asrEngine.transcribe(
+          samples = samples,
+          nThreads = _uiState.value.generationParams.threads,
+          language = null,
+          translate = false
+        )
+      )
     }
   }
 

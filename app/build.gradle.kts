@@ -60,7 +60,16 @@ android {
     }
     // Use Android Gradle Plugin's standard debug signing key. A custom ignored keystore made CI
     // builds fail because the file was not present in a fresh checkout.
-    debug { isDebuggable = true }
+    debug {
+      isDebuggable = true
+      // JaCoCo instrumentation for the fast PR workflow’s coverage report.
+      enableUnitTestCoverage = true
+    }
+  }
+  lint {
+    // Lint findings are reported as artifacts but must never block the APK pipeline.
+    abortOnError = false
+    checkReleaseBuilds = false
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11

@@ -35,9 +35,34 @@ internal object NativeLlama {
 
   external fun nativeModelInfo(): Array<String>?
 
+  /** "cpu" or "cpu+gpu:<device>" — honest report of the compiled ggml backends. */
+  external fun nativeBackendInfo(): String
+
   external fun nativeGenerate(
     roles: Array<String>,
     contents: Array<String>,
+    maxTokens: Int,
+    temperature: Float,
+    topP: Float,
+    topK: Int,
+    repeatPenalty: Float,
+    nCtx: Int,
+    nThreads: Int,
+    callback: Any?
+  ): String?
+
+  // --- Vision projector (mmproj) — optional capability ---------------------
+
+  /** Loads a vision projector against the loaded text model. Consumes [fd]. */
+  external fun nativeMtmdLoadFromFd(fd: Int): String?
+
+  external fun nativeMtmdUnload()
+
+  external fun nativeMtmdIsVisionReady(): Boolean
+
+  external fun nativeGenerateVision(
+    question: String,
+    imageBytes: ByteArray,
     maxTokens: Int,
     temperature: Float,
     topP: Float,

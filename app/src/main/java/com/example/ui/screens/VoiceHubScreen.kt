@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,6 +37,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -45,10 +49,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.ui.theme.BackgroundPitchBlack
 import com.example.ui.theme.NeonPinkContainer
 import com.example.ui.theme.NeonPinkLight
@@ -82,6 +88,13 @@ fun VoiceHubScreen(
   ) { uri: Uri? ->
     uri?.let { viewModel.transcribeAudioUri(it, it.lastPathSegment ?: "audio") }
   }
+
+  val micPermissionLauncher = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.RequestPermission()
+  ) { granted ->
+    if (granted) viewModel.startMicRecording()
+  }
+  val context = LocalContext.current
 
   Column(
     modifier = modifier
@@ -196,6 +209,28 @@ fun VoiceHubScreen(
             Text("توقف", color = BackgroundPitchBlack, fontSize = 13.sp)
           }
         }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Text(
+          text = "سرعت گفتار: " + "%.1f".format(uiState.ttsSpeed) + "\u00d7",
+          color = TextSecondary,
+          fontSize = 11.sp
+        )
+        Slider(
+          value = uiState.ttsSpeed,
+          onValueChange = { viewModel.setTtsSpeed(it) },
+          valueRange = 0.6f..1.4f,
+          steps = 7,
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("tts_speed_slider"),
+          colors = SliderDefaults.colors(
+            thumbColor = NeonPinkPrimary,
+            activeTrackColor = NeonPinkPrimary,
+            inactiveTrackColor = SurfaceCardBorder
+          )
+        )
       }
     }
 
@@ -272,6 +307,45 @@ fun VoiceHubScreen(
             color = TextPrimary,
             fontSize = 12.5.sp
           )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (uiState.isRecordingMic) {
+          Button(
+            onClick = { viewModel.stopMicRecordingAndTranscribe() },
+            colors = ButtonDefaults.buttonColors(containerColor = PerformanceBeastRed),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("stop_mic_recording_button")
+          ) {
+            Icon(Icons.Default.Stop, contentDescription = null, tint = BackgroundPitchBlack)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("توقف ضبط و رونویسی", color = BackgroundPitchBlack, fontSize = 12.5.sp, fontWeight = FontWeight.Bold)
+          }
+        } else {
+          Button(
+            onClick = {
+              if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+              ) {
+                viewModel.startMicRecording()
+              } else {
+                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+              }
+            },
+            enabled = uiState.asrModelLabel != null && !uiState.isTranscribing,
+            colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardBorder),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("start_mic_recording_button")
+          ) {
+            Icon(Icons.Default.Mic, contentDescription = null, tint = PerformanceBeastRed)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("ضبط میکروفون و رونویسی", color = TextPrimary, fontSize = 12.5.sp)
+          }
         }
 
         if (uiState.isTranscribing) {

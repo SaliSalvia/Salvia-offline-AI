@@ -87,4 +87,52 @@ class NativeLlamaBackend : LlamaBackend {
       FloatArray(5)
     }
   }
+
+  override fun loadVisionProjectorFromFd(fd: Int): String? {
+    if (!isAvailable()) return "native library unavailable"
+    return try {
+      NativeLlama.nativeMtmdLoadFromFd(fd)
+    } catch (t: Throwable) {
+      t.message ?: "vision projector load failed"
+    }
+  }
+
+  override fun unloadVisionProjector() {
+    if (!isAvailable()) return
+    try {
+      NativeLlama.nativeMtmdUnload()
+    } catch (_: Throwable) {
+      // Unload must never crash the app.
+    }
+  }
+
+  override fun isVisionReady(): Boolean {
+    if (!isAvailable()) return false
+    return try {
+      NativeLlama.nativeMtmdIsVisionReady()
+    } catch (_: Throwable) {
+      false
+    }
+  }
+
+  override fun generateVision(request: VisionChatRequest): NativeGenerationResult {
+    if (!isAvailable()) {
+      throw IllegalStateException("native library unavailable")
+    }
+    val params = request.params.sanitized()
+    val text = NativeLlama.nativeGenerateVision(
+      request.question,
+      request.imageBytes,
+      params.maxTokens,
+      params.temperature,
+      params.topP,
+      params.topK,
+      params.repeatPenalty,
+      params.contextTokens,
+      params.threads,
+      request.onToken
+    ) ?: ""
+    val cancelled = NativeLlama.nativeLastRunStatus() == 1
+    return NativeGenerationResult(text = text, wasCancelled = cancelled)
+  }
 }

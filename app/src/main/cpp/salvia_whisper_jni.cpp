@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "whisper.h"
+#include "ggml-backend.h"
 
 #define LOG_TAG "SalviaWhisper"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -63,12 +64,19 @@ bool abort_callback_fn(void * /*user_data*/) {
   return g_cancel.load(std::memory_order_relaxed);
 }
 
+// True only when this build of ggml actually carries a GPU (e.g. Vulkan)
+// device. A CPU-only build (the default APK) reports false — whisper must
+// never claim GPU work that cannot run.
+bool gpu_backend_available() {
+  return ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU) != nullptr;
+}
+
 whisper_context * load_from_owned_fd(int fd) {
   char proc_path[64];
   snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", static_cast<int>(fd));
 
   whisper_context_params cparams = whisper_context_default_params();
-  cparams.use_gpu = false; // CPU-only build for Mali safety
+  cparams.use_gpu = gpu_backend_available();
   cparams.flash_attn = true;
 
   whisper_context * ctx = whisper_init_from_file_with_params(proc_path, cparams);
@@ -125,7 +133,7 @@ Java_com_example_core_asr_NativeWhisper_nativeWhisperLoadFromPath(JNIEnv * env, 
   }
   const std::string path = jstring_to_std(env, jpath);
   whisper_context_params cparams = whisper_context_default_params();
-  cparams.use_gpu = false;
+  cparams.use_gpu = gpu_backend_available();
   cparams.flash_attn = true;
   g_ctx = whisper_init_from_file_with_params(path.c_str(), cparams);
   if (g_ctx == nullptr) {

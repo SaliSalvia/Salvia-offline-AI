@@ -30,6 +30,10 @@ set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_IS_DEV   OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
+# Multimodal (vision) support: build the standalone libmtmd for mmproj projectors.
+# llama.cpp only wires tools/mtmd in when the tools/common tree is off (our
+# case), and the vendored decoders (stb) ship as regular files in its tarball.
+set(LLAMA_BUILD_MTMD     ON CACHE BOOL "" FORCE)
 # whisper.cpp: reuse the ggml targets created by llama.cpp above (no second copy).
 set(WHISPER_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -43,6 +47,15 @@ set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)
 # Static llama/ggml linked into one shared JNI library: a single .so in the APK.
 set(BUILD_SHARED_LIBS    OFF CACHE BOOL "" FORCE)
 
+# Optional GPU (Vulkan) build — OFF by default. A Vulkan-enabled ggml needs the
+# NDK shaderc pieces and grows the .so considerably; the default APK stays
+# CPU-only for maximum device compatibility (Mali GPUs included). Build a
+# Vulkan variant locally with -DSALVIA_ENABLE_VULKAN=ON.
+option(SALVIA_ENABLE_VULKAN "Build ggml with the Vulkan GPU backend" OFF)
+if(SALVIA_ENABLE_VULKAN)
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp ${CMAKE_CURRENT_BINARY_DIR}/llama.cpp-build)
 # whisper.cpp detects the parent-provided `ggml` target and links it directly.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/whisper.cpp ${CMAKE_CURRENT_BINARY_DIR}/whisper.cpp-build)
@@ -55,4 +68,4 @@ target_compile_options(salvia_llama PRIVATE -fvisibility=hidden -O2)
 target_link_options(salvia_llama PRIVATE "-Wl,--exclude-libs,ALL")
 
 find_library(log-lib log)
-target_link_libraries(salvia_llama PRIVATE llama whisper ${log-lib})
+target_link_libraries(salvia_llama PRIVATE llama whisper mtmd ${log-lib})

@@ -26,6 +26,9 @@
 #include <unistd.h>
 
 #include "llama.h"
+#include "ggml-backend.h"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 #define LOG_TAG "SalviaLlama"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -53,6 +56,9 @@ float                   g_stats[5] = {0, 0, 0, 0, 0};
 // unload, context recreation, cancellation and errors.
 std::vector<llama_token> g_prev_tokens;
 bool                     g_prev_valid = false;
+// Multimodal projector (mmproj) attached to the current text model. mtmd keeps
+// a pointer to the model, so it MUST be freed before the model everywhere.
+mtmd_context *          g_mtmd = nullptr;
 
 struct Callbacks {
   JNIEnv *    env = nullptr;
@@ -452,6 +458,265 @@ bool run_generation(JNIEnv * env,
   return finish(!g_cancel.load(std::memory_order_relaxed));
 }
 
+// ---------------------------------------------------------------------------
+// Vision generation (mtmd): one user turn = a single image + a question.
+// ---------------------------------------------------------------------------
+
+// Same streaming/sampling policy as run_generation, but the prompt is split
+// into text and image chunks by mtmd and evaluated with its helpers. KV-cache
+// reuse is deliberately disabled: the cache holds image embeddings, so both
+// the next text turn and the next vision turn start from a fresh cache.
+bool run_generation_vision(JNIEnv * env,
+                           const jobject cb_obj,
+                           const jmethodID on_token,
+                           const std::string & question,
+                           const std::vector<unsigned char> & image_bytes,
+                           int32_t max_tokens,
+                           float temperature,
+                           float top_p,
+                           int32_t top_k,
+                           float repeat_penalty,
+                           uint32_t n_ctx_req,
+                           int32_t n_threads,
+                           std::string & out_text,
+                           RunStats & stats) {
+  using clock = std::chrono::steady_clock;
+
+  const llama_vocab * vocab = llama_model_get_vocab(g_model);
+
+  // --- decode the image via mtmd's stb-backed decoder ----------------------
+  mtmd_helper_init_opt helper_opt = mtmd_helper_init_opt_default();
+  mtmd_helper_bitmap_wrapper wrapper =
+      mtmd_helper_bitmap_init_from_buf(g_mtmd, image_bytes.data(), image_bytes.size(),
+                                       false, helper_opt);
+  mtmd_bitmap * bitmap = wrapper.bitmap;
+  if (bitmap == nullptr) {
+    throw_runtime(env, "could not decode this image (unsupported format?)");
+    return false;
+  }
+
+  // --- chat prompt with the media marker -----------------------------------
+  const char * marker = mtmd_get_marker(g_mtmd);
+  if (marker == nullptr) {
+    marker = mtmd_default_marker();
+  }
+  const std::string user_content = std::string(marker) + "\n" + question;
+  const std::string prompt = apply_chat_template(
+      g_model, std::vector<std::string>{"user"}, std::vector<std::string>{user_content});
+
+  mtmd_input_text input_text;
+  input_text.text = prompt.c_str();
+  input_text.text_len = prompt.size();
+  input_text.add_special = false;   // the chat template already added BOS
+  input_text.parse_special = true;  // required to recognize the media marker
+
+  mtmd_input_chunks * chunks = mtmd_input_chunks_init();
+  const mtmd_bitmap * bitmaps[1] = {bitmap};
+  const int32_t tokenize_rc = mtmd_tokenize(g_mtmd, chunks, &input_text, bitmaps, 1);
+  if (tokenize_rc != 0) {
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(bitmap);
+    throw_runtime(env, tokenize_rc == 2 ? "image preprocessing failed"
+                                       : "media marker mismatch in prompt");
+    return false;
+  }
+
+  const size_t n_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
+
+  // --- context budget (image tokens included) ------------------------------
+  const int32_t n_train = llama_model_n_ctx_train(g_model);
+  uint32_t want_ctx = n_ctx_req;
+  if (want_ctx == 0) {
+    want_ctx = 2048;
+  }
+  if (n_train > 0 && want_ctx > static_cast<uint32_t>(n_train)) {
+    want_ctx = static_cast<uint32_t>(n_train);
+  }
+  const int32_t headroom = static_cast<int32_t>(want_ctx) -
+      static_cast<int32_t>(n_prompt_tokens) - 8;
+  if (headroom <= 0) {
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(bitmap);
+    throw_runtime(env, "image + question exceed the selected context window");
+    return false;
+  }
+  if (max_tokens > headroom) {
+    max_tokens = headroom;
+  }
+
+  const int gen_threads = n_threads > 0 ? n_threads : 4;
+  const unsigned int reported_hw_threads = std::thread::hardware_concurrency();
+  const int hw_threads = reported_hw_threads > 0
+                             ? static_cast<int>(reported_hw_threads)
+                             : gen_threads;
+  const int batch_threads = std::min(hw_threads, gen_threads + 2);
+
+  // --- (re)create context if needed ----------------------------------------
+  if (g_ctx == nullptr || g_ctx_size != want_ctx) {
+    if (g_ctx != nullptr) {
+      llama_free(g_ctx);
+      g_ctx = nullptr;
+    }
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx = want_ctx;
+    cparams.n_batch = std::min<uint32_t>(1024, want_ctx);
+    // Non-causal vision models require image tokens to fit inside one ubatch.
+    cparams.n_ubatch = std::min<uint32_t>(1024, want_ctx);
+    cparams.n_threads = gen_threads;
+    cparams.n_threads_batch = batch_threads;
+    cparams.abort_callback = abort_callback_fn;
+    cparams.abort_callback_data = nullptr;
+    g_ctx = llama_init_from_model(g_model, cparams);
+    if (g_ctx == nullptr) {
+      mtmd_input_chunks_free(chunks);
+      mtmd_bitmap_free(bitmap);
+      throw_runtime(env, "failed to create llama context (out of memory?)");
+      return false;
+    }
+    g_ctx_size = want_ctx;
+  } else {
+    llama_set_n_threads(g_ctx, gen_threads, batch_threads);
+  }
+
+  // Vision turns never share KV state with text turns.
+  llama_memory_clear(llama_get_memory(g_ctx), true);
+  g_prev_valid = false;
+
+  // --- sampler chain (same policy as text runs) -----------------------------
+  const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+  llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+  if (temperature <= 0.05f) {
+    llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+  } else {
+    llama_sampler_chain_add(smpl,
+        llama_sampler_init_penalties(n_vocab, 64, repeat_penalty, 0.0f, 0.0f));
+    if (top_k > 0) {
+      llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
+    }
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(top_p, 1));
+    llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+  }
+
+  // Chunks/bitmap/sampler belong to this run only; the KV cache keeps image
+  // embeddings, so text-run reuse stays disabled afterwards.
+  auto cleanup = [&]() {
+    llama_sampler_free(smpl);
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(bitmap);
+    g_prev_valid = false;
+  };
+
+  if (g_cancel.load(std::memory_order_relaxed)) {
+    cleanup();
+    return false;
+  }
+
+  // --- evaluate text + image chunks (mtmd helper) ---------------------------
+  const auto t0 = clock::now();
+  llama_pos new_n_past = 0;
+  const int32_t n_batch = static_cast<int32_t>(llama_n_batch(g_ctx));
+  const int32_t eval_rc = mtmd_helper_eval_chunks(g_mtmd, g_ctx, chunks,
+                                                  0, 0, n_batch, true, &new_n_past);
+  stats.prompt_tokens = static_cast<int32_t>(n_prompt_tokens);
+  stats.prompt_ms = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
+  if (eval_rc != 0) {
+    const bool cancelled = g_cancel.load(std::memory_order_relaxed);
+    cleanup();
+    if (!cancelled) {
+      throw_runtime(env, "image evaluation failed (out of memory?)");
+    }
+    return false;
+  }
+
+  // Penalties only see real text tokens; image embeddings carry no token ids.
+  const size_t n_chunks = mtmd_input_chunks_size(chunks);
+  for (size_t i = 0; i < n_chunks; i++) {
+    const mtmd_input_chunk * chunk = mtmd_input_chunks_get(chunks, i);
+    if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+      size_t n_text = 0;
+      const llama_token * text_tokens = mtmd_input_chunk_get_tokens_text(chunk, &n_text);
+      for (size_t j = 0; j < n_text; j++) {
+        llama_sampler_accept(smpl, text_tokens[j]);
+      }
+    }
+  }
+
+  // --- token generation loop (identical streaming to text runs) ------------
+  const auto t1 = clock::now();
+  std::string pending_utf8;
+  int32_t n_gen = 0;
+
+  while (n_gen < max_tokens) {
+    if (g_cancel.load(std::memory_order_relaxed)) {
+      break;
+    }
+
+    llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
+
+    if (llama_vocab_is_eog(vocab, tok)) {
+      stats.gen_tokens = n_gen;
+      stats.gen_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+      cleanup();
+      return true;
+    }
+
+    char piece_buf[256];
+    const int n_piece = llama_token_to_piece(vocab, tok, piece_buf,
+                                             static_cast<int32_t>(sizeof(piece_buf)), 0, false);
+    if (n_piece > 0) {
+      pending_utf8.append(piece_buf, static_cast<size_t>(n_piece));
+      out_text.append(piece_buf, static_cast<size_t>(n_piece));
+      const size_t complete = utf8_complete_prefix(pending_utf8);
+      if (complete > 0 && cb_obj != nullptr && on_token != nullptr) {
+        jstring js = to_jstring_utf8(env, pending_utf8.substr(0, complete));
+        if (js != nullptr) {
+          env->CallVoidMethod(cb_obj, on_token, js);
+          env->DeleteLocalRef(js);
+          if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+          }
+        }
+        pending_utf8.erase(0, complete);
+      }
+    }
+    n_gen++;
+
+    llama_batch batch = llama_batch_get_one(&tok, 1);
+    if (llama_decode(g_ctx, batch) != 0) {
+      const bool cancelled = g_cancel.load(std::memory_order_relaxed);
+      stats.gen_tokens = n_gen;
+      stats.gen_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+      cleanup();
+      if (!cancelled) {
+        throw_runtime(env, "llama_decode failed during vision generation");
+      }
+      return false;
+    }
+  }
+
+  // Flush any trailing complete bytes.
+  if (!pending_utf8.empty() && cb_obj != nullptr && on_token != nullptr) {
+    const size_t complete = utf8_complete_prefix(pending_utf8);
+    if (complete > 0) {
+      jstring js = to_jstring_utf8(env, pending_utf8.substr(0, complete));
+      if (js != nullptr) {
+        env->CallVoidMethod(cb_obj, on_token, js);
+        env->DeleteLocalRef(js);
+        if (env->ExceptionCheck()) {
+          env->ExceptionClear();
+        }
+      }
+    }
+  }
+
+  stats.gen_tokens = n_gen;
+  stats.gen_ms = std::chrono::duration<double, std::milli>(clock::now() - t1).count();
+  const bool completed = !g_cancel.load(std::memory_order_relaxed);
+  cleanup();
+  return completed;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -499,6 +764,10 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromFd(JNIEnv * env, jclass,
   }
   g_prev_tokens.clear();
   g_prev_valid = false;
+  if (g_mtmd != nullptr) {
+    mtmd_free(g_mtmd); // dies before the text model it points to
+    g_mtmd = nullptr;
+  }
 
   Callbacks cb;
   cb.env = env;
@@ -569,6 +838,10 @@ Java_com_example_core_llm_NativeLlama_nativeLoadFromPath(JNIEnv * env, jclass,
   }
   g_prev_tokens.clear();
   g_prev_valid = false;
+  if (g_mtmd != nullptr) {
+    mtmd_free(g_mtmd); // dies before the text model it points to
+    g_mtmd = nullptr;
+  }
 
   const std::string path = jstring_to_std(env, jpath);
 
@@ -619,6 +892,10 @@ Java_com_example_core_llm_NativeLlama_nativeUnload(JNIEnv *, jclass) {
   }
   g_prev_tokens.clear();
   g_prev_valid = false;
+  if (g_mtmd != nullptr) {
+    mtmd_free(g_mtmd); // dies before the text model it points to
+    g_mtmd = nullptr;
+  }
   LOGI("model unloaded");
 }
 
@@ -767,6 +1044,182 @@ Java_com_example_core_llm_NativeLlama_nativeGenerate(
 
   if (env->ExceptionCheck()) {
     // run_generation already queued a RuntimeException; propagate it.
+    return nullptr;
+  }
+
+  g_last_status = completed ? 0 : 1;
+  g_stats[0] = static_cast<float>(stats.prompt_tokens);
+  g_stats[1] = static_cast<float>(stats.prompt_ms);
+  g_stats[2] = static_cast<float>(stats.gen_tokens);
+  g_stats[3] = static_cast<float>(stats.gen_ms);
+  g_stats[4] = stats.gen_ms > 0.0
+                   ? static_cast<float>(stats.gen_tokens * 1000.0 / stats.gen_ms)
+                   : 0.0f;
+
+  return to_jstring_utf8(env, out_text);
+}
+
+// Honest backend report for the UI: "cpu" on the default CPU-only build, or
+// "cpu+gpu:<device>" when this build carries a GPU (e.g. Vulkan) ggml device.
+// The UI shows this instead of implying NPU/GPU acceleration that is not there.
+JNIEXPORT jstring JNICALL
+Java_com_example_core_llm_NativeLlama_nativeBackendInfo(JNIEnv * env, jclass) {
+  std::string info = "cpu";
+  ggml_backend_dev_t gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+  if (gpu != nullptr) {
+    const char * name = ggml_backend_dev_name(gpu);
+    if (name != nullptr && name[0] != '\0') {
+      info = std::string("cpu+gpu:") + name;
+    }
+  }
+  return to_jstring_utf8(env, info);
+}
+
+// --- Vision projector (mmproj) ---------------------------------------------
+
+// Loads a multimodal projector (mmproj GGUF) against the loaded text model.
+// The fd is consumed. Returns null on success or an error message.
+JNIEXPORT jstring JNICALL
+Java_com_example_core_llm_NativeLlama_nativeMtmdLoadFromFd(JNIEnv * env, jclass, jint fd) {
+  std::lock_guard<std::mutex> run_lock(g_generate_mutex);
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+
+  if (g_mtmd != nullptr) {
+    mtmd_free(g_mtmd);
+    g_mtmd = nullptr;
+  }
+  if (g_model == nullptr) {
+    close(static_cast<int>(fd));
+    return to_jstring_utf8(env, "load the text model first; the vision projector attaches to it");
+  }
+
+  char proc_path[64];
+  snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", static_cast<int>(fd));
+
+  mtmd_context_params mp = mtmd_context_params_default();
+  mp.use_gpu = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU) != nullptr;
+  mp.print_timings = false;
+  mp.warmup = false;
+
+  g_mtmd = mtmd_init_from_file(proc_path, g_model, mp);
+  close(static_cast<int>(fd)); // mtmd/gguf holds its own handle/mapping
+  if (g_mtmd == nullptr) {
+    return to_jstring_utf8(env, "mtmd could not load this mmproj file (does it match the loaded text model?)");
+  }
+  if (!mtmd_support_vision(g_mtmd)) {
+    mtmd_free(g_mtmd);
+    g_mtmd = nullptr;
+    return to_jstring_utf8(env, "this mmproj does not provide vision input");
+  }
+  LOGI("vision projector loaded");
+  return nullptr;
+}
+
+JNIEXPORT void JNICALL
+Java_com_example_core_llm_NativeLlama_nativeMtmdUnload(JNIEnv *, jclass) {
+  std::lock_guard<std::mutex> run_lock(g_generate_mutex);
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+  if (g_mtmd != nullptr) {
+    mtmd_free(g_mtmd);
+    g_mtmd = nullptr;
+    LOGI("vision projector unloaded");
+  }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_example_core_llm_NativeLlama_nativeMtmdIsVisionReady(JNIEnv *, jclass) {
+  std::lock_guard<std::mutex> lock(g_model_mutex);
+  return (g_mtmd != nullptr && mtmd_support_vision(g_mtmd)) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Runs one image + question turn through the loaded text model and vision
+// projector. Streams answer text via callback.onToken; returns null when
+// cancelled. Throws RuntimeException on errors.
+JNIEXPORT jstring JNICALL
+Java_com_example_core_llm_NativeLlama_nativeGenerateVision(
+    JNIEnv * env, jclass,
+    jstring jquestion, jbyteArray jimage,
+    jint max_tokens, jfloat temperature, jfloat top_p, jint top_k,
+    jfloat repeat_penalty, jint n_ctx, jint n_threads,
+    jobject callback) {
+  std::lock_guard<std::mutex> run_lock(g_generate_mutex);
+
+  g_cancel.store(false, std::memory_order_relaxed);
+  g_last_status = 0;
+  g_stats[0] = g_stats[1] = g_stats[2] = g_stats[3] = g_stats[4] = 0;
+
+  {
+    std::lock_guard<std::mutex> model_lock(g_model_mutex);
+    if (g_model == nullptr) {
+      throw_runtime(env, "no text model is loaded");
+      return nullptr;
+    }
+    if (g_mtmd == nullptr) {
+      throw_runtime(env, "no vision projector is loaded");
+      return nullptr;
+    }
+  }
+
+  const std::string question = jstring_to_std(env, jquestion);
+  if (question.empty()) {
+    throw_runtime(env, "empty question");
+    return nullptr;
+  }
+  if (jimage == nullptr || env->GetArrayLength(jimage) <= 0) {
+    throw_runtime(env, "empty image");
+    return nullptr;
+  }
+  const jsize image_len = env->GetArrayLength(jimage);
+  std::vector<unsigned char> image_bytes(static_cast<size_t>(image_len));
+  env->GetByteArrayRegion(jimage, 0, image_len,
+                          reinterpret_cast<jbyte *>(image_bytes.data()));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    throw_runtime(env, "could not read image bytes");
+    return nullptr;
+  }
+
+  Callbacks cb;
+  cb.env = env;
+  cb.obj = nullptr;
+  if (callback != nullptr) {
+    cb.obj = env->NewGlobalRef(callback);
+    jclass cls = env->GetObjectClass(callback);
+    cb.on_token = env->GetMethodID(cls, "onToken", "(Ljava/lang/String;)V");
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) {
+      env->ExceptionClear();
+      cb.on_token = nullptr;
+    }
+  }
+
+  std::string out_text;
+  RunStats stats;
+  bool completed = false;
+  try {
+    completed = run_generation_vision(env, cb.obj, cb.on_token, question, image_bytes,
+                                      static_cast<int32_t>(max_tokens),
+                                      static_cast<float>(temperature),
+                                      static_cast<float>(top_p),
+                                      static_cast<int32_t>(top_k),
+                                      static_cast<float>(repeat_penalty),
+                                      static_cast<uint32_t>(n_ctx),
+                                      static_cast<int32_t>(n_threads),
+                                      out_text, stats);
+  } catch (...) {
+    if (cb.obj != nullptr) {
+      env->DeleteGlobalRef(cb.obj);
+    }
+    throw_runtime(env, "unexpected native failure during vision generation");
+    return nullptr;
+  }
+
+  if (cb.obj != nullptr) {
+    env->DeleteGlobalRef(cb.obj);
+  }
+
+  if (env->ExceptionCheck()) {
+    // run_generation_vision already queued a RuntimeException; propagate it.
     return nullptr;
   }
 

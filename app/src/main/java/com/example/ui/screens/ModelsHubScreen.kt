@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -88,6 +89,12 @@ fun ModelsHubScreen(
     contract = ActivityResultContracts.OpenDocument()
   ) { uri: Uri? ->
     uri?.let { viewModel.attachFileUri(it) }
+  }
+
+  val mmprojPicker = rememberLauncherForActivityResult(
+    contract = ActivityResultContracts.OpenDocument()
+  ) { uri: Uri? ->
+    uri?.let { viewModel.loadVisionProjectorFromUri(it, it.lastPathSegment ?: "mmproj.gguf") }
   }
 
   val filteredModels = if (selectedFilter == null) {
@@ -164,6 +171,62 @@ fun ModelsHubScreen(
         modifier = Modifier.weight(1f)
       )
     }
+
+    // Honest ggml backend report (CPU-only build -> "cpu"; Vulkan build shows
+    // the real GPU device). Never imply acceleration that is not compiled in.
+    Text(
+      text = "بک‌اند استنتاج: ${uiState.inferenceBackendLabel}",
+      color = TextTertiary,
+      fontSize = 10.5.sp
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+
+    // Vision projector (mmproj): attaches to the loaded text model and enables
+    // real offline image understanding. Honest states only — no projector,
+    // no "vision ready" claims.
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+      OutlinedButton(
+        onClick = { mmprojPicker.launch(arrayOf("*/*")) },
+        enabled = uiState.textSlotModel.isLoaded,
+        shape = RoundedCornerShape(10.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, TurboActiveGreen.copy(alpha = 0.6f)),
+        modifier = Modifier
+          .weight(1f)
+          .testTag("import_mmproj_button")
+      ) {
+        Icon(Icons.Default.Image, contentDescription = null, tint = TurboActiveGreen, modifier = Modifier.size(14.dp))
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+          text = if (uiState.visionProjectorLabel == null) "وارد کردن پروژکتور بینایی (mmproj)" else "تغییر پروژکتور بینایی",
+          color = TextPrimary,
+          fontSize = 11.sp
+        )
+      }
+      if (uiState.visionProjectorLabel != null) {
+        OutlinedButton(
+          onClick = { viewModel.unloadVisionProjector() },
+          shape = RoundedCornerShape(10.dp),
+          border = androidx.compose.foundation.BorderStroke(1.dp, PerformanceBeastRed.copy(alpha = 0.6f))
+        ) {
+          Text("خروج mmproj", color = PerformanceBeastRed, fontSize = 11.sp)
+        }
+      }
+    }
+    Text(
+      text = if (uiState.visionProjectorLabel != null) {
+        "بینایی آماده است — عکس را در گفت‌وگو پیوست کنید و دربارهٔ آن بپرسید."
+      } else if (uiState.textSlotModel.isLoaded) {
+        "بینایی غیرفعال است؛ پروژکتور mmproj متناسب با مدل (مثلاً mmproj-Qwen2.5-VL) را وارد کنید."
+      } else {
+        "برای بینایی، ابتدا مدل متنی GGUF و سپس پروژکتور mmproj را بارگذاری کنید."
+      },
+      color = if (uiState.visionProjectorLabel != null) TurboActiveGreen else TextTertiary,
+      fontSize = 10.5.sp
+    )
 
     // Live weight-loading progress from the native loader (mmap read).
     val loadPercent = uiState.modelLoadPercent
