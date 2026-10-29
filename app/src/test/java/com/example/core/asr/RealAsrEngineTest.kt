@@ -21,6 +21,7 @@ class RealAsrEngineTest {
     var transcriptToReturn = "سلام دنیا"
     var languageToReturn = "fa"
     var lastSamplesSize = 0
+    var cancelCount = 0
 
     override fun isAvailable(): Boolean = available
 
@@ -55,6 +56,10 @@ class RealAsrEngineTest {
     override fun lastLanguage(): String = languageToReturn
     override fun modelInfo(): Array<String> =
       if (loaded && !emptyModelInfo) arrayOf("whisper.cpp") else emptyArray()
+
+    override fun cancel() {
+      cancelCount++
+    }
   }
 
   private fun engine(backend: FakeAsrBackend, pss: LongArray = longArrayOf(500L, 2500L)): RealAsrEngine {
@@ -126,6 +131,15 @@ class RealAsrEngineTest {
     val eng = engine(FakeAsrBackend())
     val outcome = eng.transcribe(FloatArray(1024))
     assertTrue(outcome is RealAsrEngine.TranscribeOutcome.Failure)
+  }
+
+  @Test
+  fun `cancel propagates to the backend`() {
+    val backend = FakeAsrBackend()
+    val eng = engine(backend)
+    eng.cancel()
+    eng.cancel()
+    assertEquals(2, backend.cancelCount)
   }
 
   @Test

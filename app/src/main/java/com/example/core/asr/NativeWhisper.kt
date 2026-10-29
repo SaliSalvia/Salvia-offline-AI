@@ -20,6 +20,9 @@ internal object NativeWhisper {
 
   external fun nativeWhisperFree()
 
+  /** Asks an in-flight (or next) transcription to stop as soon as possible. */
+  external fun nativeWhisperCancel()
+
   external fun nativeWhisperTranscribe(
     samples: FloatArray,
     nSamples: Int,

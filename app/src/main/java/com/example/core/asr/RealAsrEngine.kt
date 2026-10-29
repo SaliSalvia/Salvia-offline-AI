@@ -70,6 +70,12 @@ class RealAsrEngine(
   }
 
   /**
+   * Asks an in-flight transcription to stop as soon as possible; the pending
+   * [transcribe] call then fails honestly with "transcription cancelled".
+   */
+  fun cancel() = backend.cancel()
+
+  /**
    * Transcribes 16 kHz mono float PCM. [durationSeconds] of the input is echoed
    * into the result for UI display.
    */

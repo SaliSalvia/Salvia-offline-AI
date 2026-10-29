@@ -29,6 +29,13 @@ interface AsrBackend {
 
   /** Metadata: [modelLabel] or empty when no model is loaded. */
   fun modelInfo(): Array<String>
+
+  /**
+   * Asks the current (or next) [transcribe] call to stop as soon as possible.
+   * Must stay non-blocking and callable *while* a transcription is running,
+   * so implementations must not take the transcription lock.
+   */
+  fun cancel()
 }
 
 /** Result of one transcription run. */
