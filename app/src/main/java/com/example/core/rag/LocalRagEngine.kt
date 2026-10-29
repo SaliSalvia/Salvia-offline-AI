@@ -72,7 +72,9 @@ class LocalRagEngine {
 
     synchronized(records) {
       // Drop the stale statistics of a re-indexed document before adding the new ones.
-      val removed = records.removeAll { it.chunk.documentName == documentName }
+      // removeAll(predicate) returns Boolean, so capture the removed records first.
+      val removed = records.filter { it.chunk.documentName == documentName }
+      records.removeAll { it.chunk.documentName == documentName }
       for (rec in removed) {
         for ((term, tf) in rec.termFreqs) {
           if (tf > 0) {

@@ -38,7 +38,7 @@ object ConversationCompactor {
     triggerFraction: Float = DEFAULT_TRIGGER_FRACTION
   ): Plan {
     val usable = priorMessages.filter { it.role == "user" || it.role == "assistant" }
-    if (usable.isEmpty()) return Plan(shouldCompact = false, aged = emptyList(), kept = emptyList)
+    if (usable.isEmpty()) return Plan(shouldCompact = false, aged = emptyList(), kept = emptyList())
 
     val totalChars = usable.sumOf { it.content.length + 16 } + currentChars
     val threshold = (charBudget * triggerFraction).toInt()
